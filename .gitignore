@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.playwright-mcp/
+playwright-report/
+test-results/
+gr55-*.png
