@@ -854,7 +854,7 @@ textarea {
 .workspace-grid {
   min-height: 0;
   display: grid;
-  grid-template-columns: 252px minmax(620px, 1fr) 342px;
+  grid-template-columns: 228px minmax(760px, 1fr) 304px;
   overflow: hidden;
 }
 
@@ -3313,7 +3313,7 @@ input[type="number"] {
 
 @media (max-width: 1320px) {
   .workspace-grid {
-    grid-template-columns: 270px minmax(500px, 1fr) 300px;
+    grid-template-columns: 220px minmax(640px, 1fr) 276px;
   }
 
   .parameter-control {
@@ -3397,7 +3397,7 @@ input[type="number"] {
   }
 
   .workspace-grid {
-    grid-template-columns: 280px minmax(0, 1fr);
+    grid-template-columns: 220px minmax(0, 1fr);
     overflow: visible;
   }
 

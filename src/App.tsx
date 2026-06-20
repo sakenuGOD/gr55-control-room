@@ -931,7 +931,6 @@ export function App() {
       setValues((current) => ({ ...current, [param.id]: bounded }));
       setSelection({ type: "parameter", paramId: param.id });
       setActiveModuleId(param.moduleId);
-      setActiveTabId(param.moduleId);
 
       const canSendLive = shouldSend && patchLoaded && activeStatus === "ready";
       const sent = canSendLive
