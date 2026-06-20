@@ -1,0 +1,106 @@
+{
+  "kind": "gr55-control-room.user-73-3-hardware-verification",
+  "at": "2026-06-20T15:46:30.619Z",
+  "ok": true,
+  "slot": {
+    "label": "73-3",
+    "userIndex": 218,
+    "bankMsb": 1,
+    "program": 90
+  },
+  "patchName": "GHOSTLY",
+  "backupFiles": [
+    "hardware-backups/user-73-3-2026-06-20T15-46-18-592Z-codex-verification-mapped-backup.json",
+    "hardware-backups/user-73-3-2026-06-20T15-46-18-592Z-codex-verification-mapped-backup.syx.txt",
+    "hardware-backups/user-73-3-2026-06-20T15-46-18-592Z-codex-verification-mapped-backup.syx"
+  ],
+  "stagedProbe": {
+    "id": "pcm1Level",
+    "stagedValue": 66,
+    "hardwareBefore": 65,
+    "hardwareAfterNoSend": 65,
+    "ok": true
+  },
+  "changedSaveResponses": [
+    {
+      "address": "0F 00 00 01",
+      "data": "00 00 00 01 00 5A 7F",
+      "bytes": "F0 41 10 00 00 53 12 0F 00 00 01 00 00 00 01 00 5A 7F 16 F7"
+    },
+    {
+      "address": "0F 00 00 02",
+      "data": "00 00 00 01 00 5A 7F",
+      "bytes": "F0 41 10 00 00 53 12 0F 00 00 02 00 00 00 01 00 5A 7F 15 F7"
+    }
+  ],
+  "restoreSaveResponses": [
+    {
+      "address": "0F 00 00 01",
+      "data": "00 00 00 01 00 5A 7F",
+      "bytes": "F0 41 10 00 00 53 12 0F 00 00 01 00 00 00 01 00 5A 7F 16 F7"
+    },
+    {
+      "address": "0F 00 00 02",
+      "data": "00 00 00 01 00 5A 7F",
+      "bytes": "F0 41 10 00 00 53 12 0F 00 00 02 00 00 00 01 00 5A 7F 15 F7"
+    }
+  ],
+  "changes": [
+    {
+      "id": "pcm1Level",
+      "label": "Part Level",
+      "address": "18 00 20 04",
+      "original": 65,
+      "test": 66,
+      "tempReadback": 66,
+      "savedReadback": 66,
+      "restoreTempReadback": 65,
+      "restoreSavedReadback": 65
+    },
+    {
+      "id": "pcm1String1Level",
+      "label": "String 1 Level",
+      "address": "18 00 20 10",
+      "original": 100,
+      "test": 99,
+      "tempReadback": 99,
+      "savedReadback": 99,
+      "restoreTempReadback": 100,
+      "restoreSavedReadback": 100
+    },
+    {
+      "id": "modelingString1Level",
+      "label": "String 1 Level",
+      "address": "18 00 10 0B",
+      "original": 100,
+      "test": 99,
+      "tempReadback": 99,
+      "savedReadback": 99,
+      "restoreTempReadback": 100,
+      "restoreSavedReadback": 100
+    },
+    {
+      "id": "delayLevel",
+      "label": "Effect Level",
+      "address": "18 00 06 0B",
+      "original": 73,
+      "test": 74,
+      "tempReadback": 74,
+      "savedReadback": 74,
+      "restoreTempReadback": 73,
+      "restoreSavedReadback": 73
+    },
+    {
+      "id": "eqLowGain",
+      "label": "Low Gain",
+      "address": "18 00 06 13",
+      "original": 0,
+      "test": 1,
+      "tempReadback": 1,
+      "savedReadback": 1,
+      "restoreTempReadback": 0,
+      "restoreSavedReadback": 0
+    }
+  ],
+  "note": "Save responses at 0F 00 00 01/02 are observed but still not semantically decoded; pass criteria use explicit mapped read-back."
+}

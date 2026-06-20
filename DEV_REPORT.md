@@ -9,7 +9,10 @@
 - PCM1, PCM2, Modeling/COSM and Normal PU are no longer UI-only source stubs. They are normal registry modules and participate in read/write/export/dirty state.
 - Save flow no longer marks data clean immediately after the save command. It writes staged changes to temporary memory, sends the GR-55 save command, then RQ1 reads back patch name and changed parameters before showing verified saved state.
 - Import parses mapped DT1 messages into editor state, including patch name and mapped parameter values. The raw queue remains visible for inspection/send.
-- Export mapped patch now writes readable SysEx text plus parsed mapped JSON. This is not a full raw bulk backup.
+- Export mapped patch now writes readable SysEx text, binary mapped `.syx` and parsed mapped JSON. This is not a full raw bulk backup.
+- Text/binary SysEx import autodetection handles readable hex text and binary SysEx payloads.
+- The UI now has a simplified studio toolbar, Patch Manager, command palette, grouped module navigation and a mapped String Matrix.
+- A local MCP stdio server exists in `scripts/gr55-mcp-server.mjs` with hardware mode through the native bridge and mock mode through `GR55_MCP_MOCK=1`.
 
 ## Newly Mapped Source Controls
 
@@ -44,14 +47,19 @@ Official Roland docs confirm the patch architecture, tone categories and paramet
 
 ## Verification Run
 
-- `npm test`: 5 files, 46 tests passed after the hardware pacing/unmapped-address patch.
-- `npm run build`: TypeScript and Vite production build passed after the hardware pacing/unmapped-address patch.
+- `npm test`: 7 files, 55 tests passed after the MCP, registry metadata and UI refactor changes.
+- `npm run build`: TypeScript and Vite production build passed after the MCP, registry metadata and UI refactor changes.
 - `git diff --check`: passed.
+- MCP stdio smoke:
+  - `GR55_MCP_MOCK=1 node scripts/gr55-mcp-server.mjs` returned the 19-tool catalog.
+  - Hardware-mode `gr55_connect` returned bridge `ready`.
+  - Hardware-mode `gr55_get_patch_name` returned `GHOSTLY`.
 - Browser checks on `http://127.0.0.1:5173/`:
   - Desktop and mobile loaded.
   - No visible `Not mapped yet`, `Unmapped source stub`, or design-stub text.
-  - No detected text/control overflow in checked viewports.
-  - PCM1 source opens a real module editor with registry controls and fixture-only badges.
+  - No detected text/control overflow in checked desktop `1440x900` or mobile `390x844` viewports.
+  - `Cmd/Ctrl+K` command palette opens with read/save/connect/reset/export/SysEx/identity commands.
+  - String Matrix renders 6 string rows plus explicit developer mapping-needed notes for unavailable per-string pitch/routing fields.
 - UI hardware pass on `http://127.0.0.1:5173/` with Native Bridge running:
   - Selected `USER 73-3` through Patch Manager.
   - UI completed `Mapped read complete for USER 73-3: 109/109`.
@@ -68,12 +76,21 @@ Official Roland docs confirm the patch architecture, tone categories and paramet
   - Expanded mapped read completed `110/110` messages including patch name, no checksum errors.
   - Patch name write/save/read-back passed: `GHOSTLY -> GHOSTLY TMP -> GHOSTLY`.
   - PCM1 Level write/save/read-back passed: `65 -> 66 -> 65`.
+  - Additional representative control write/save/read-back/restore passed:
+    - PCM1 String 1 Level `100 -> 99 -> 100`.
+    - Modeling String 1 Level `100 -> 99 -> 100`.
+    - Delay Level `73 -> 74 -> 73`.
+    - EQ Low Gain `0 -> 1 -> 0`.
+  - New backup before representative writes:
+    - `hardware-backups/user-73-3-2026-06-20T15-46-18-592Z-codex-verification-mapped-backup.*`.
+  - New report:
+    - `hardware-backups/user-73-3-2026-06-20T15-46-18-592Z-codex-verification-report.json`.
   - Final read-back restored USER 73-3 to `GHOSTLY`, PCM1 Level `65`.
 
 Still pending for full verification:
 - Full write verification for every individual mapped source/effect control.
 - Full raw GR-55 bulk patch backup/restore.
-- Binary `.syx` mapped export.
+- Real `.g5l` parser and full Roland librarian-file semantics.
 
 ## External Blocker
 

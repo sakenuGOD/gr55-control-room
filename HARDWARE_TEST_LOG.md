@@ -251,3 +251,64 @@
 - Clear USER slot by muted overwrite.
 - Import queue send/save.
 - Individual write verification for every mapped PCM/modeling/source/effect control.
+
+## 2026-06-20 18:46 MSK, Representative Control Write/Save/Restore Verification
+
+- App route: Vite dev server at `http://127.0.0.1:5173/`.
+- Connection route: Native Bridge over `ws://127.0.0.1:5174`.
+- GR-55 detected: yes, bridge startup reported `devices=1`.
+- Endpoint set: `cfg 1 / if 2 / alt 0 / out 3 / in 2`.
+- Safe USER slot: `USER 73-3`.
+- USER index: `218`; Bank MSB `1`; Program `90` (`0x5A`).
+- Patch name before writes: `GHOSTLY`.
+
+### Backup Before Writes
+
+- Mapped read completed `109/109` mapped parameters plus patch name.
+- Backup artifacts:
+  - `hardware-backups/user-73-3-2026-06-20T15-46-18-592Z-codex-verification-mapped-backup.json`
+  - `hardware-backups/user-73-3-2026-06-20T15-46-18-592Z-codex-verification-mapped-backup.syx.txt`
+  - `hardware-backups/user-73-3-2026-06-20T15-46-18-592Z-codex-verification-mapped-backup.syx`
+
+### Actions Tested
+
+- Selected `USER 73-3`:
+  - `B0 00 01`
+  - `C0 5A`
+- Staged/no-send behavior probe:
+  - `pcm1Level` staged target `66`.
+  - Hardware read before no-send: `65`.
+  - Hardware read after no-send: `65`.
+- Temporary write, save, read-back, restore, save, read-back verification:
+  - `pcm1Level`: `65 -> 66 -> 65`.
+  - `pcm1String1Level`: `100 -> 99 -> 100`.
+  - `modelingString1Level`: `100 -> 99 -> 100`.
+  - `delayLevel`: `73 -> 74 -> 73`.
+  - `eqLowGain`: `0 -> 1 -> 0`.
+- Save responses were observed after both changed save and restore save:
+  - `0F 00 00 01`, data `00 00 00 01 00 5A 7F`.
+  - `0F 00 00 02`, data `00 00 00 01 00 5A 7F`.
+
+### Pass / Fail Notes
+
+- PASS: Native Bridge connected to the real GR-55.
+- PASS: Mapped backup was captured before writing.
+- PASS: Staged mode did not alter hardware before explicit send.
+- PASS: All five representative controls wrote to temporary memory and read back.
+- PASS: Save to `USER 73-3` persisted the changed values and read-back matched.
+- PASS: Restore writes and restore save returned `USER 73-3` to the original values above.
+- PASS: Registry may mark only these representative parameter IDs as `verified`.
+- PARTIAL: Save response addresses `0F 00 00 01` and `0F 00 00 02` are still observed-only; semantic decode remains TODO.
+- PARTIAL: Backup is mapped temporary-patch data, not a full Roland bulk dump.
+
+### Artifacts
+
+- Full report:
+  - `hardware-backups/user-73-3-2026-06-20T15-46-18-592Z-codex-verification-report.json`
+
+### Not Tested Intentionally
+
+- Full raw GR-55 bulk patch backup/restore.
+- Clear USER slot by muted overwrite.
+- Import queue send/save.
+- Per-control write/save/read-back for every mapped parameter outside the five representative controls listed above.

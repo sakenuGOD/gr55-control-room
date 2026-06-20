@@ -1,24 +1,14 @@
 import {
-  ArrowClockwise,
   ArrowCounterClockwise,
   CheckCircle,
-  Circuitry,
   ClipboardText,
-  Command,
-  DownloadSimple,
   DotsThree,
   FadersHorizontal,
   FileArrowUp,
-  FloppyDisk,
   Keyboard,
-  ListMagnifyingGlass,
-  MagnifyingGlass,
-  Plugs,
-  Power,
   Pulse,
   Queue,
   Sliders,
-  Usb,
   WarningCircle,
   UploadSimple,
 } from "@phosphor-icons/react";
@@ -27,6 +17,7 @@ import {
   MODULES,
   PARAMETERS_BY_ADDRESS,
   PARAMETERS_BY_ID,
+  UNMAPPED_PARAMETER_TODOS,
   createInitialParameterValues,
   decodeParameterValue,
   makeMappedPatchReadMessages,
@@ -36,6 +27,9 @@ import {
   type ParameterDefinition,
   type ParameterModuleId,
 } from "./data/gr55Parameters";
+import { StringMatrix } from "./components/editor/StringMatrix";
+import { PatchManager } from "./components/librarian/PatchManager";
+import { StudioToolbar, type CommandPaletteCommand } from "./components/layout/StudioToolbar";
 import { USER_PATCHES, type UserPatch } from "./data/gr55PatchMap";
 import { useDirectUsb } from "./hooks/useDirectUsb";
 import { useMidi } from "./hooks/useMidi";
@@ -83,7 +77,14 @@ type TransportMode = "bridge" | "midi" | "usb";
 type OperationState = "idle" | "sending" | "saved" | "error";
 type WorkflowState = "disconnected" | "select-slot" | "ready-to-read" | "ready-to-edit" | "dirty";
 type PatchSlotState = "unread" | "reading" | "loaded" | "dirty" | "saved" | "error";
-type EditorTabId = "overview" | "tones" | "assigns" | "pedal" | "system" | "sysex" | ParameterModuleId;
+type EditorTabId = "overview" | "strings" | "tones" | "assigns" | "pedal" | "system" | "sysex" | ParameterModuleId;
+type EditorTabGroupId = "librarian" | "sources" | "effects" | "assigns" | "debug";
+type EditorTabDefinition = {
+  id: EditorTabId;
+  label: string;
+  moduleId?: ParameterModuleId;
+  group: EditorTabGroupId;
+};
 type SourceField =
   | "enabled"
   | "level"
@@ -281,25 +282,36 @@ const CLEAR_TEMP_PARAMETER_VALUES: Record<string, number> = {
   nsSwitch: 0,
 };
 
-const EDITOR_TABS: Array<{ id: EditorTabId; label: string; moduleId?: ParameterModuleId }> = [
-  { id: "overview", label: "Overview" },
-  { id: "tones", label: "Tones" },
-  { id: "pcm1", label: "PCM1", moduleId: "pcm1" },
-  { id: "pcm2", label: "PCM2", moduleId: "pcm2" },
-  { id: "modeling", label: "Modeling", moduleId: "modeling" },
-  { id: "normal-pu", label: "Normal PU", moduleId: "normal-pu" },
-  { id: "common", label: "Patch", moduleId: "common" },
-  { id: "amp", label: "Amp", moduleId: "amp" },
-  { id: "mod", label: "MOD", moduleId: "mod" },
-  { id: "mfx", label: "MFX", moduleId: "mfx" },
-  { id: "chorus", label: "Chorus", moduleId: "chorus" },
-  { id: "delay", label: "Delay", moduleId: "delay" },
-  { id: "reverb", label: "Reverb", moduleId: "reverb" },
-  { id: "eq", label: "EQ", moduleId: "eq" },
-  { id: "noise", label: "Output", moduleId: "noise" },
-  { id: "assigns", label: "Assigns" },
-  { id: "pedal", label: "Pedal/GK" },
-  { id: "sysex", label: "SysEx" },
+const EDITOR_TAB_GROUP_LABELS: Record<EditorTabGroupId, string> = {
+  librarian: "Librarian",
+  sources: "Sources",
+  effects: "Effects",
+  assigns: "Assigns / Pedals",
+  debug: "SysEx / MCP / Debug",
+};
+
+const EDITOR_TAB_GROUP_ORDER: EditorTabGroupId[] = ["librarian", "sources", "effects", "assigns", "debug"];
+
+const EDITOR_TABS: EditorTabDefinition[] = [
+  { id: "overview", label: "Overview", group: "librarian" },
+  { id: "common", label: "Patch", moduleId: "common", group: "librarian" },
+  { id: "pcm1", label: "PCM1", moduleId: "pcm1", group: "sources" },
+  { id: "pcm2", label: "PCM2", moduleId: "pcm2", group: "sources" },
+  { id: "modeling", label: "Modeling/COSM", moduleId: "modeling", group: "sources" },
+  { id: "normal-pu", label: "Normal PU", moduleId: "normal-pu", group: "sources" },
+  { id: "strings", label: "String Matrix", group: "sources" },
+  { id: "tones", label: "Tone List", group: "sources" },
+  { id: "amp", label: "Amp", moduleId: "amp", group: "effects" },
+  { id: "mod", label: "MOD", moduleId: "mod", group: "effects" },
+  { id: "mfx", label: "MFX", moduleId: "mfx", group: "effects" },
+  { id: "chorus", label: "Chorus", moduleId: "chorus", group: "effects" },
+  { id: "delay", label: "Delay", moduleId: "delay", group: "effects" },
+  { id: "reverb", label: "Reverb", moduleId: "reverb", group: "effects" },
+  { id: "eq", label: "EQ/Output", moduleId: "eq", group: "effects" },
+  { id: "noise", label: "Noise Suppressor", moduleId: "noise", group: "effects" },
+  { id: "assigns", label: "Assigns", group: "assigns" },
+  { id: "pedal", label: "Pedal/GK", group: "assigns" },
+  { id: "sysex", label: "SysEx/MCP", group: "debug" },
 ];
 
 const MODULE_IDS = new Set<EditorTabId>(MODULES.map((module) => module.id));
@@ -339,7 +351,7 @@ export function App() {
   const [patchSlots, setPatchSlots] = useState<Record<number, PatchSlotRecord>>({});
   const [incomingBankMsb, setIncomingBankMsb] = useState(0);
   const [activeModuleId, setActiveModuleId] = useState<ParameterModuleId>("mfx");
-  const [activeTabId, setActiveTabId] = useState<EditorTabId>("mfx");
+  const [activeTabId, setActiveTabId] = useState<EditorTabId>("overview");
   const [values, setValues] = useState<ParameterValues>(() => initialValues);
   const [originalValues, setOriginalValues] = useState<ParameterValues>(() => initialValues);
   const [performanceValues, setPerformanceValues] = useState<ParameterValues>(() =>
@@ -362,6 +374,7 @@ export function App() {
   const [redoStack, setRedoStack] = useState<ParameterHistoryItem[]>([]);
   const [compareActive, setCompareActive] = useState(false);
   const [utilityDrawerOpen, setUtilityDrawerOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [previewedDirtyChanges, setPreviewedDirtyChanges] = useState(false);
   const [mappedReadProgress, setMappedReadProgressState] = useState<MappedReadProgress>(() =>
     createIdleMappedReadProgress(MAPPED_PARAMETER_COUNT),
@@ -1095,7 +1108,7 @@ export function App() {
       }
       const param = sourceFieldParam(source, field);
       if (!param) {
-        setReadStatus(`${source.label} ${sourceFieldLabel(field)} is not mapped yet.`);
+        setReadStatus(`Mapping needed: ${source.label} ${sourceFieldLabel(field)} has no registry parameter.`);
         return;
       }
 
@@ -1442,13 +1455,15 @@ export function App() {
       },
       ...MODULES.flatMap((module) =>
         module.parameters.map((param) => ({
-        label: `${module.shortTitle} ${param.label}`,
-        bytes: makeParameterMessage(param, values[param.id], deviceId),
+          label: `${module.shortTitle} ${param.label}`,
+          bytes: makeParameterMessage(param, values[param.id], deviceId),
         })),
       ),
     ];
     const url = makeDownloadBlobUrl(messages);
     downloadUrl(url, `gr55-user-${selectedPatch.label}-mapped-patch.txt`);
+    const syxUrl = makeBinarySysExDownloadUrl(messages);
+    downloadUrl(syxUrl, `gr55-user-${selectedPatch.label}-mapped-patch.syx`);
     const parsedUrl = makeJsonDownloadUrl({
       kind: "gr55-control-room.mapped-patch",
       exportedAt: new Date().toISOString(),
@@ -1476,6 +1491,7 @@ export function App() {
     });
     downloadUrl(parsedUrl, `gr55-user-${selectedPatch.label}-mapped-patch.json`);
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    window.setTimeout(() => URL.revokeObjectURL(syxUrl), 1000);
     window.setTimeout(() => URL.revokeObjectURL(parsedUrl), 1000);
   }, [deviceId, patchLoaded, patchName, requireSelectedSlot, selectedPatch, values]);
 
@@ -1553,16 +1569,103 @@ export function App() {
     [originalValues, setParameter],
   );
 
+  const commandPaletteCommands = useMemo<CommandPaletteCommand[]>(
+    () => [
+      {
+        id: "read-selected",
+        label: "Read selected",
+        detail: slotSelectionConfirmed ? `Read mapped parameters from USER ${selectedPatch.label}` : "Select a USER slot first",
+        shortcut: "Cmd/Ctrl+R",
+        disabled: !slotSelectionConfirmed,
+        onRun: () => void requestMappedPatch(),
+      },
+      {
+        id: "send-staged",
+        label: "Send Staged",
+        detail: dirtyCount ? `Send ${dirtyCount} staged change${dirtyCount === 1 ? "" : "s"} to temporary memory` : "No staged changes",
+        disabled: !patchLoaded || dirtyCount === 0,
+        onRun: () => void sendPreviewChanges(),
+      },
+      {
+        id: "save-selected",
+        label: "Save selected",
+        detail: slotSelectionConfirmed ? `Save to USER ${selectedPatch.label} with read-back verification` : "Select and read a USER slot first",
+        shortcut: "Cmd/Ctrl+S",
+        disabled: !slotSelectionConfirmed || !patchLoaded || dirtyCount === 0,
+        onRun: () => void sendSaveToSelectedPatch(),
+      },
+      {
+        id: "connect-bridge",
+        label: "Connect bridge",
+        detail: "Use the native USB bridge route",
+        onRun: () => {
+          setTransportMode("bridge");
+          bridge.connect();
+          bridge.connectUsb();
+        },
+      },
+      {
+        id: "reset-usb",
+        label: "Reset USB",
+        detail: "Ask the bridge to reset the GR-55 USB device",
+        onRun: bridge.resetUsb,
+      },
+      {
+        id: "export-mapped",
+        label: "Export mapped patch",
+        detail: patchLoaded ? "Write mapped .txt, .json and .syx files" : "Read mapped values before export",
+        disabled: !slotSelectionConfirmed || !patchLoaded,
+        onRun: exportMappedPatch,
+      },
+      {
+        id: "open-sysex",
+        label: "Open SysEx utility",
+        detail: "Show raw SysEx and import queue tools",
+        onRun: () => setUtilityDrawerOpen(true),
+      },
+      {
+        id: "identify",
+        label: "Identify GR-55",
+        detail: "Send a Roland identity request",
+        onRun: sendIdentity,
+      },
+    ],
+    [
+      bridge,
+      dirtyCount,
+      exportMappedPatch,
+      patchLoaded,
+      requestMappedPatch,
+      selectedPatch.label,
+      sendIdentity,
+      sendPreviewChanges,
+      sendSaveToSelectedPatch,
+      slotSelectionConfirmed,
+    ],
+  );
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (!event.metaKey) {
+      const key = event.key.toLowerCase();
+      const modifier = event.metaKey || event.ctrlKey;
+
+      if (modifier && key === "k") {
+        event.preventDefault();
+        setCommandPaletteOpen((current) => !current);
         return;
       }
 
-      const key = event.key.toLowerCase();
+      if (!modifier) {
+        return;
+      }
+
       if (key === "s") {
         event.preventDefault();
         sendSaveToSelectedPatch();
+      }
+      if (key === "r") {
+        event.preventDefault();
+        void requestMappedPatch();
       }
       if (key === "f") {
         event.preventDefault();
@@ -1579,7 +1682,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [redoParameterChange, sendSaveToSelectedPatch, undoParameterChange]);
+  }, [redoParameterChange, requestMappedPatch, sendSaveToSelectedPatch, undoParameterChange]);
 
   useEffect(() => {
     if (dirtyCount === 0 && compareActive) {
@@ -1635,48 +1738,46 @@ export function App() {
 
   return (
     <main className="mac-window" aria-label="Roland GR-55 patch editor">
-      <TopToolbar
+      <StudioToolbar
         status={activeStatus}
         outputName={activeConnectionLabel}
-        transportMode={transportMode}
         selectedPatch={selectedPatch}
+        patchName={patchName}
         slotSelectionConfirmed={slotSelectionConfirmed}
         dirtyCount={dirtyCount}
         patchLoaded={patchLoaded}
-        workflowState={workflowState}
         operationState={operationState}
         liveWrite={liveWrite}
-        compareActive={compareActive}
-        previewedDirtyChanges={previewedDirtyChanges}
-        canUndo={undoStack.length > 0}
-        canRedo={redoStack.length > 0}
-        canCompare={dirtyCount > 0}
-        onTransportModeChange={setTransportMode}
-        onConnect={connectActiveTransport}
-        onIdentity={sendIdentity}
+        commandPaletteOpen={commandPaletteOpen}
+        onCommandPaletteOpenChange={setCommandPaletteOpen}
+        commands={commandPaletteCommands}
         onReadPatch={() => void requestMappedPatch()}
         onSendChanges={sendPreviewChanges}
         onSavePatch={sendSaveToSelectedPatch}
-        onToggleCompare={() => setCompareActive((current) => !current)}
-        onUndo={undoParameterChange}
-        onRedo={redoParameterChange}
         onLiveWriteChange={setLiveWrite}
         onFocusSearch={() => patchSearchRef.current?.focus()}
-        onOpenUtilityDrawer={() => setUtilityDrawerOpen(true)}
-        onBridgeRefresh={bridge.refresh}
-        onBridgeResetUsb={bridge.resetUsb}
-        onMidiRefresh={midi.refresh}
-        onUsbRefresh={usb.refresh}
-        onCopyModule={copyCurrentModule}
-        onExportModule={exportCurrentModule}
-        onExportMappedPatch={exportMappedPatch}
-        onClearTemporaryPatch={clearTemporaryPatch}
-        onClearSelectedUserPatch={clearSelectedUserPatch}
-        onPanic={sendPanic}
       />
 
       <section className="workspace-grid" aria-label="GR-55 editor workspace">
         <aside className="sidebar-pane" aria-label="Device and patch library">
+          <PatchManager
+            searchRef={patchSearchRef}
+            selectedPatch={selectedPatch}
+            slotSelectionConfirmed={slotSelectionConfirmed}
+            patchLoaded={patchLoaded}
+            readStatus={readStatus}
+            dirtyCount={dirtyCount}
+            patchName={patchName}
+            patchNameDirty={patchNameDirty}
+            patchSlots={patchSlots}
+            onSelectPatch={selectPatch}
+            onReadPatch={() => void requestMappedPatch()}
+            onSavePatch={() => void sendSaveToSelectedPatch()}
+            onClearSelectedPatch={clearSelectedUserPatch}
+            onExportMappedPatch={exportMappedPatch}
+            onOpenImport={() => setUtilityDrawerOpen(true)}
+          />
+
           <DeviceSidebar
             status={midi.status}
             error={midi.error}
@@ -1722,24 +1823,6 @@ export function App() {
             onDeviceIdChange={setDeviceId}
             liveWrite={liveWrite}
             onLiveWriteChange={setLiveWrite}
-          />
-
-          <PatchLibrary
-            searchRef={patchSearchRef}
-            selectedPatch={selectedPatch}
-            slotSelectionConfirmed={slotSelectionConfirmed}
-            patchLoaded={patchLoaded}
-            readStatus={readStatus}
-            dirtyCount={dirtyCount}
-            patchName={patchName}
-            patchNameDirty={patchNameDirty}
-            patchSlots={patchSlots}
-            onSelectPatch={selectPatch}
-            onReadPatch={() => void requestMappedPatch()}
-            onSavePatch={() => void sendSaveToSelectedPatch()}
-            onClearSelectedPatch={clearSelectedUserPatch}
-            onExportMappedPatch={exportMappedPatch}
-            onOpenImport={() => setUtilityDrawerOpen(true)}
           />
 
           <QuickMonitor
@@ -1809,7 +1892,13 @@ export function App() {
             onExportModule={exportCurrentModule}
           />
 
-          {activeTabId === "tones" || activeTabId === "pedal" || activeTabId === "assigns" || activeTabId === "sysex" || activeTabId === "system" ? (
+          {activeTabId === "strings" ? (
+            <StringMatrix
+              values={editorValues}
+              originalValues={originalValues}
+              onChange={setParameter}
+            />
+          ) : activeTabId === "tones" || activeTabId === "pedal" || activeTabId === "assigns" || activeTabId === "sysex" || activeTabId === "system" ? (
             <SpecialTabPanel
               tabId={activeTabId}
               selectedPatch={selectedPatch}
@@ -1874,259 +1963,9 @@ export function App() {
   );
 }
 
-function TopToolbar({
-  status,
-  outputName,
-  transportMode,
-  selectedPatch,
-  slotSelectionConfirmed,
-  dirtyCount,
-  patchLoaded,
-  workflowState,
-  operationState,
-  liveWrite,
-  compareActive,
-  previewedDirtyChanges,
-  canUndo,
-  canRedo,
-  canCompare,
-  onTransportModeChange,
-  onConnect,
-  onIdentity,
-  onReadPatch,
-  onSendChanges,
-  onSavePatch,
-  onToggleCompare,
-  onUndo,
-  onRedo,
-  onLiveWriteChange,
-  onFocusSearch,
-  onOpenUtilityDrawer,
-  onBridgeRefresh,
-  onBridgeResetUsb,
-  onMidiRefresh,
-  onUsbRefresh,
-  onCopyModule,
-  onExportModule,
-  onExportMappedPatch,
-  onClearTemporaryPatch,
-  onClearSelectedUserPatch,
-  onPanic,
-}: {
-  status: string;
-  outputName: string;
-  transportMode: TransportMode;
-  selectedPatch: UserPatch;
-  slotSelectionConfirmed: boolean;
-  dirtyCount: number;
-  patchLoaded: boolean;
-  workflowState: WorkflowState;
-  operationState: OperationState;
-  liveWrite: boolean;
-  compareActive: boolean;
-  previewedDirtyChanges: boolean;
-  canUndo: boolean;
-  canRedo: boolean;
-  canCompare: boolean;
-  onTransportModeChange: (mode: TransportMode) => void;
-  onConnect: () => void;
-  onIdentity: () => void;
-  onReadPatch: () => void;
-  onSendChanges: () => void;
-  onSavePatch: () => void;
-  onToggleCompare: () => void;
-  onUndo: () => void;
-  onRedo: () => void;
-  onLiveWriteChange: (value: boolean) => void;
-  onFocusSearch: () => void;
-  onOpenUtilityDrawer: () => void;
-  onBridgeRefresh: () => void;
-  onBridgeResetUsb: () => void;
-  onMidiRefresh: () => void;
-  onUsbRefresh: () => void;
-  onCopyModule: () => void;
-  onExportModule: () => void;
-  onExportMappedPatch: () => void;
-  onClearTemporaryPatch: () => void;
-  onClearSelectedUserPatch: () => void;
-  onPanic: () => void;
-}) {
-  const isReady = status === "ready";
-  const confirmSafetyAction = (message: string, action: () => void) => {
-    if (window.confirm(message)) {
-      action();
-    }
-  };
-
-  return (
-    <header className="mac-toolbar">
-      <div className="traffic-lights" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </div>
-
-      <div className="toolbar-status" role="status" aria-live="polite">
-        <span className={`connection-dot status-${status}`} aria-hidden="true" />
-        <strong>{isReady ? "GR-55 Connected" : "Disconnected"}</strong>
-        <span>{outputName || "No route selected"}</span>
-      </div>
-
-      <button type="button" className="patch-select-button" onClick={onFocusSearch}>
-        {slotSelectionConfirmed ? `USER ${selectedPatch.label}` : "No slot selected"}
-        {slotSelectionConfirmed ? (
-          dirtyCount ? <span>{dirtyCount} unsaved</span> : <span>clean</span>
-        ) : (
-          <span>choose USER slot</span>
-        )}
-      </button>
-
-      <div className="toolbar-group action-group" aria-label="Primary workflow actions">
-        {workflowState === "disconnected" ? (
-          <button type="button" className="toolbar-button primary" onClick={onConnect}>
-            <Plugs size={17} aria-hidden="true" />
-            Connect
-          </button>
-        ) : workflowState === "select-slot" ? (
-          <button type="button" className="toolbar-button primary" onClick={onFocusSearch}>
-            <Command size={17} aria-hidden="true" />
-            Select USER slot
-          </button>
-        ) : workflowState === "ready-to-read" ? (
-          <button type="button" className="toolbar-button primary" onClick={onReadPatch}>
-            <DownloadSimple size={17} aria-hidden="true" />
-            Read Patch
-          </button>
-        ) : workflowState === "dirty" ? (
-          <>
-            <button type="button" className="toolbar-button secondary" onClick={onSendChanges}>
-              <Power size={17} aria-hidden="true" />
-              {previewedDirtyChanges ? "Send Again" : "Send Staged"}
-            </button>
-            <button type="button" className={`toolbar-button secondary ${compareActive ? "is-selected" : ""}`} disabled={!canCompare} aria-pressed={compareActive} onClick={onToggleCompare}>
-              <CheckCircle size={17} aria-hidden="true" />
-              Show Original
-            </button>
-            <button type="button" className="toolbar-button primary" onClick={onSavePatch}>
-              <FloppyDisk size={17} aria-hidden="true" />
-              Save to GR-55
-            </button>
-          </>
-        ) : (
-          <>
-            <span className="workflow-guidance">{patchLoaded ? "Choose source or module" : "Patch not loaded"}</span>
-            <button type="button" className="toolbar-button secondary" onClick={onReadPatch}>
-              <DownloadSimple size={17} aria-hidden="true" />
-              Read Patch
-            </button>
-          </>
-        )}
-      </div>
-
-      <div className="toolbar-end">
-        <div className="preview-mode" role="group" aria-label="Preview mode">
-          <span>Preview</span>
-          <button type="button" className={!liveWrite ? "is-active" : ""} aria-pressed={!liveWrite} onClick={() => onLiveWriteChange(false)}>
-            Staged
-          </button>
-          <button type="button" className={liveWrite ? "is-active" : ""} aria-pressed={liveWrite} onClick={() => onLiveWriteChange(true)}>
-            Live
-          </button>
-        </div>
-        {operationState !== "idle" ? (
-          <span className={`operation-chip state-${operationState}`}>
-            {operationState === "sending" ? "Sending" : operationState === "saved" ? "Verified" : "Send failed"}
-          </span>
-        ) : null}
-        <details className="toolbar-more">
-          <summary aria-label="More actions" title="More actions">
-            <DotsThree size={20} aria-hidden="true" />
-          </summary>
-          <div className="toolbar-menu">
-            <div className="menu-section">
-              <span>Connection route</span>
-              <div className="toolbar-group route-group" role="group" aria-label="MIDI route selector">
-                <SegmentedButton active={transportMode === "bridge"} onClick={() => onTransportModeChange("bridge")}>
-                  Bridge
-                </SegmentedButton>
-                <SegmentedButton active={transportMode === "midi"} onClick={() => onTransportModeChange("midi")}>
-                  MIDI
-                </SegmentedButton>
-                <SegmentedButton active={transportMode === "usb"} onClick={() => onTransportModeChange("usb")}>
-                  USB
-                </SegmentedButton>
-              </div>
-            </div>
-            <div className="menu-section menu-grid">
-              <button type="button" onClick={onIdentity}>
-                <Usb size={15} aria-hidden="true" />
-                Identify GR-55
-              </button>
-              <button type="button" onClick={onFocusSearch}>
-                <Command size={15} aria-hidden="true" />
-                Search patches
-              </button>
-              <button type="button" disabled={!canUndo} onClick={onUndo}>
-                <ArrowCounterClockwise size={15} aria-hidden="true" />
-                Undo
-              </button>
-              <button type="button" disabled={!canRedo} onClick={onRedo}>
-                <ArrowClockwise size={15} aria-hidden="true" />
-                Redo
-              </button>
-              <button type="button" disabled={!canCompare} aria-pressed={compareActive} onClick={onToggleCompare}>
-                <CheckCircle size={15} aria-hidden="true" />
-                Show original values
-              </button>
-              <button type="button" onClick={onOpenUtilityDrawer}>
-                <Queue size={15} aria-hidden="true" />
-                Raw SysEx drawer
-              </button>
-            </div>
-            <details className="menu-section nested-disclosure">
-              <summary>Module and maintenance</summary>
-              <button type="button" onClick={onCopyModule}>Copy module SysEx</button>
-              <button type="button" onClick={onExportModule}>Export mapped module</button>
-              <button type="button" onClick={onExportMappedPatch}>Export mapped patch</button>
-              <button type="button" onClick={onBridgeRefresh}>Refresh bridge</button>
-              <button type="button" onClick={onMidiRefresh}>Refresh MIDI</button>
-              <button type="button" onClick={onUsbRefresh}>Refresh USB</button>
-              <button type="button" onClick={onBridgeResetUsb}>Reset USB</button>
-            </details>
-            <details className="menu-section nested-disclosure safety-disclosure">
-              <summary>Advanced / Safety</summary>
-              <button type="button" onClick={() => confirmSafetyAction("Mute the temporary patch by turning off the main effect blocks?", onClearTemporaryPatch)}>Mute temporary patch</button>
-              <button type="button" onClick={onClearSelectedUserPatch}>Clear USER {selectedPatch.label}</button>
-              <button type="button" onClick={() => confirmSafetyAction("Send All Notes Off on the current MIDI channel?", onPanic)}>All notes off</button>
-            </details>
-          </div>
-        </details>
-      </div>
-    </header>
-  );
-}
-
 function SegmentedButton({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <button type="button" className={active ? "is-active" : ""} onClick={onClick} aria-pressed={active}>
-      {children}
-    </button>
-  );
-}
-
-function IconButton({
-  label,
-  disabled,
-  onClick,
-  children,
-}: {
-  label: string;
-  disabled?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button type="button" className="icon-button" aria-label={label} title={label} disabled={disabled} onClick={onClick}>
       {children}
     </button>
   );
@@ -2389,156 +2228,6 @@ function DeviceSidebar({
           </div>
         </details>
       </details>
-    </section>
-  );
-}
-
-function PatchLibrary({
-  searchRef,
-  selectedPatch,
-  slotSelectionConfirmed,
-  patchLoaded,
-  readStatus,
-  dirtyCount,
-  patchName,
-  patchNameDirty,
-  patchSlots,
-  onSelectPatch,
-  onReadPatch,
-  onSavePatch,
-  onClearSelectedPatch,
-  onExportMappedPatch,
-  onOpenImport,
-}: {
-  searchRef: React.RefObject<HTMLInputElement | null>;
-  selectedPatch: UserPatch;
-  slotSelectionConfirmed: boolean;
-  patchLoaded: boolean;
-  readStatus: string;
-  dirtyCount: number;
-  patchName: string;
-  patchNameDirty: boolean;
-  patchSlots: Record<number, PatchSlotRecord>;
-  onSelectPatch: (patch: UserPatch) => void;
-  onReadPatch: () => void;
-  onSavePatch: () => void;
-  onClearSelectedPatch: () => void;
-  onExportMappedPatch: () => void;
-  onOpenImport: () => void;
-}) {
-  const [query, setQuery] = useState("");
-  const [bankFilter, setBankFilter] = useState("all");
-  const normalizedQuery = query.trim().toLowerCase();
-  const visible = USER_PATCHES.filter((patch) => {
-    const inBank = bankFilter === "all" || patch.bank === Number(bankFilter);
-    if (!inBank) {
-      return false;
-    }
-    if (!normalizedQuery) {
-      return true;
-    }
-    const cachedName = patchSlots[patch.userIndex]?.name ?? "";
-    return `USER ${patch.label} ${cachedName}`.toLowerCase().includes(normalizedQuery);
-  });
-
-  return (
-    <section className="sidebar-section" aria-labelledby="patch-library-title">
-      <SectionHeader id="patch-library-title" title="Patch Manager" icon={<ListMagnifyingGlass size={16} aria-hidden="true" />} aside={`${visible.length}/297`} />
-
-      <div className="search-field">
-        <MagnifyingGlass size={15} aria-hidden="true" />
-        <input
-          ref={searchRef}
-          type="search"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search USER patches"
-          aria-label="Search patches"
-        />
-      </div>
-
-      <div className={`library-current ${dirtyCount ? "is-dirty" : ""} ${patchLoaded ? "is-loaded" : "is-unread"}`}>
-        <span>{slotSelectionConfirmed ? "Selected USER slot" : "No USER slot selected"}</span>
-        <strong>
-          {slotSelectionConfirmed ? `USER ${selectedPatch.label}${patchName ? ` - ${patchName}` : ""}` : "Choose a slot below"}
-          {slotSelectionConfirmed && dirtyCount ? <em>{dirtyCount} unsaved</em> : null}
-        </strong>
-        <small>
-          {slotSelectionConfirmed
-            ? `Bank MSB ${selectedPatch.bankMsb}, PC ${selectedPatch.program}`
-            : "The app has not sent Bank Select / Program Change yet."}
-        </small>
-        <small>
-          {slotSelectionConfirmed
-            ? patchLoaded
-              ? patchNameDirty
-                ? "Patch name rename is staged."
-                : "Mapped DT1 responses have updated the editor."
-              : "Selection only. Patch contents have not been read yet."
-            : "Select a slot before reading, exporting, saving, importing into, or clearing a USER slot."}
-        </small>
-        <small>{readStatus}</small>
-      </div>
-
-      <div className="librarian-actions">
-        {!slotSelectionConfirmed ? (
-          <button type="button" className="primary" disabled>Select a slot below</button>
-        ) : !patchLoaded ? (
-          <button type="button" className="primary" onClick={onReadPatch}>Read selected</button>
-        ) : dirtyCount ? (
-          <button type="button" className="primary" onClick={onSavePatch}>Save to selected</button>
-        ) : (
-          <button type="button" className="primary" onClick={onReadPatch}>Read again</button>
-        )}
-        <button type="button" onClick={onExportMappedPatch}>Export mapped patch</button>
-        <button type="button" onClick={onOpenImport}>Import SysEx</button>
-        <button type="button" className="danger" onClick={onClearSelectedPatch}>Clear selected</button>
-      </div>
-
-      <Field label="Bank filter">
-        <select value={bankFilter} onChange={(event) => setBankFilter(event.target.value)}>
-          <option value="all">All USER banks</option>
-          {Array.from({ length: 99 }, (_, index) => index + 1).map((bank) => (
-            <option key={bank} value={bank}>
-              USER {bank.toString().padStart(2, "0")}
-            </option>
-          ))}
-        </select>
-      </Field>
-
-      <div className="patch-list" role="listbox" aria-label="GR-55 USER patches">
-        {visible.length === 0 ? (
-          <p className="empty-state">No matching USER patches.</p>
-        ) : (
-          visible.map((patch) => (
-            (() => {
-              const slot = patchSlots[patch.userIndex];
-              const selected = slotSelectionConfirmed && patch.userIndex === selectedPatch.userIndex;
-              const state = selected && dirtyCount ? "dirty" : slot?.status ?? (selected && !patchLoaded ? "reading" : "unread");
-              const name = selected && patchName ? patchName : slot?.name;
-              return (
-            <button
-              type="button"
-              key={patch.userIndex}
-              className={`${selected ? "is-selected" : ""} ${state === "dirty" ? "is-dirty" : ""} ${
-                state === "saved" ? "is-saved" : state === "error" ? "is-error" : ""
-              }`}
-              onClick={() => onSelectPatch(patch)}
-              role="option"
-              aria-selected={selected}
-            >
-              <span>
-                USER {patch.label}
-                {name ? <strong>{name}</strong> : null}
-                <em>{state}</em>
-              </span>
-              <small>PC {patch.program}</small>
-            </button>
-              );
-            })()
-          ))
-        )}
-      </div>
     </section>
   );
 }
@@ -3025,7 +2714,7 @@ function FocusedModuleEditor({
   onCopyModule: () => void;
   onExportModule: () => void;
 }) {
-  const controls = moduleIntentControls(module);
+  const controls = moduleIntentControls(module, values);
   const enabledParam = module.parameters.find((param) => param.kind === "toggle");
   const enabled = enabledParam ? values[enabledParam.id] > 0 : true;
 
@@ -3176,32 +2865,45 @@ function ModuleTabs({
   values,
   onSelect,
 }: {
-  tabs: Array<{ id: EditorTabId; label: string; moduleId?: ParameterModuleId }>;
+  tabs: EditorTabDefinition[];
   activeTabId: EditorTabId;
   values: ParameterValues;
   onSelect: (tabId: EditorTabId) => void;
 }) {
+  const groups = EDITOR_TAB_GROUP_ORDER.map((groupId) => ({
+    id: groupId,
+    label: EDITOR_TAB_GROUP_LABELS[groupId],
+    tabs: tabs.filter((tab) => tab.group === groupId),
+  })).filter((group) => group.tabs.length > 0);
+
   return (
     <nav className="module-tabs" aria-label="Patch modules">
-      {tabs.map((tab) => {
-        const module = tab.moduleId ? MODULES.find((item) => item.id === tab.moduleId) : null;
-        const switchParam = module?.parameters.find((param) => param.kind === "toggle");
-        const isModuleTab = Boolean(module);
-        const isOn = switchParam ? values[switchParam.id] > 0 : false;
-        return (
-          <button
-            key={tab.id}
-            type="button"
-            className={`${activeTabId === tab.id ? "is-active" : ""} ${isModuleTab ? (isOn ? "is-on" : "is-off") : "is-neutral"}`}
-            onClick={() => onSelect(tab.id)}
-            aria-current={activeTabId === tab.id ? "page" : undefined}
-            aria-label={`${tab.label}${isModuleTab ? (isOn ? ", on" : ", off") : ""}`}
-          >
-            <span className={`module-status-dot ${isModuleTab ? "" : "is-hidden"}`} aria-hidden="true" />
-            <span>{tab.label}</span>
-          </button>
-        );
-      })}
+      {groups.map((group) => (
+        <div className="module-tab-group" key={group.id}>
+          <span className="module-tab-group-label">{group.label}</span>
+          <div className="module-tab-buttons">
+            {group.tabs.map((tab) => {
+              const module = tab.moduleId ? MODULES.find((item) => item.id === tab.moduleId) : null;
+              const switchParam = module?.parameters.find((param) => param.kind === "toggle");
+              const isModuleTab = Boolean(module);
+              const isOn = switchParam ? values[switchParam.id] > 0 : false;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  className={`${activeTabId === tab.id ? "is-active" : ""} ${isModuleTab ? (isOn ? "is-on" : "is-off") : "is-neutral"}`}
+                  onClick={() => onSelect(tab.id)}
+                  aria-current={activeTabId === tab.id ? "page" : undefined}
+                  aria-label={`${tab.label}${isModuleTab ? (isOn ? ", on" : ", off") : ""}`}
+                >
+                  <span className={`module-status-dot ${isModuleTab ? "" : "is-hidden"}`} aria-hidden="true" />
+                  <span>{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
     </nav>
   );
 }
@@ -3235,9 +2937,10 @@ function ModuleEditor({
   onCopyModule: () => void;
   onExportModule: () => void;
 }) {
-  const switchParam = module.parameters.find((param) => param.kind === "toggle");
-  const typeParam = module.parameters.find((param) => param.kind === "select");
-  const mainParameters = module.parameters.filter((param) => param !== switchParam && param !== typeParam);
+  const visibleParameters = module.parameters.filter((param) => dependenciesSatisfied(param, values));
+  const switchParam = visibleParameters.find((param) => param.kind === "toggle");
+  const typeParam = visibleParameters.find((param) => param.kind === "select");
+  const mainParameters = visibleParameters.filter((param) => param !== switchParam && param !== typeParam);
   const keyParameters = mainParameters.slice(0, 4);
   const additionalParameters = mainParameters.slice(4);
 
@@ -3547,24 +3250,21 @@ function SpecialTabPanel({
       <section className="module-editor special-panel" aria-labelledby="pedal-panel-title">
         <div className="module-header">
           <div>
-            <span>{tabId === "pedal" ? "Mapped CC" : "Not implemented"}</span>
+            <span>{tabId === "pedal" ? "Mapped CC" : "Mapping needed"}</span>
             <h2 id="pedal-panel-title">Pedal, GK and assigns</h2>
           </div>
           <button type="button" onClick={onReadModule}>Read current module</button>
         </div>
         <PerformancePanel controls={controls} values={performanceValues} onChange={onPerformanceChange} />
         {tabId === "assigns" ? (
-          <>
-            <p className="mapping-note">Assign target bytes are not mapped yet. The rows below are placeholders only.</p>
-            <div className="assignment-table">
-              {["GK S1", "GK S2", "EXP switch", "CTL pedal", "Assign 1-8"].map((label) => (
-                <div key={label}>
-                  <strong>{label}</strong>
-                  <span>Not implemented yet. No SysEx mapping is wired.</span>
-                </div>
+          <details className="mapping-needed" open>
+            <summary>Developer mapping needed</summary>
+            <ul>
+              {UNMAPPED_PARAMETER_TODOS.filter((todo) => todo.section === "assigns").map((todo) => (
+                <li key={todo.id}>{todo.displayName}: {todo.reason}</li>
               ))}
-            </div>
-          </>
+            </ul>
+          </details>
         ) : null}
       </section>
     );
@@ -3589,12 +3289,16 @@ function SpecialTabPanel({
                 <strong>{source.label}</strong>
                 <span>{sourceIsOn(source, values) ? "On" : "Off"}</span>
                 <span>{sourceSummary(source, values)}</span>
-                <span>{levelParam ? formatParameterValue(levelParam, values[levelParam.id]) : "unmapped"}</span>
-                <span>{panParam ? formatParameterValue(panParam, values[panParam.id]) : "unmapped"}</span>
+                <span>{levelParam ? formatParameterValue(levelParam, values[levelParam.id]) : "n/a"}</span>
+                <span>{panParam ? formatParameterValue(panParam, values[panParam.id]) : "n/a"}</span>
               </div>
             );
           })}
         </div>
+        <details className="mapping-needed">
+          <summary>Developer mapping needed</summary>
+          <p>Per-source fields that do not appear in this table are absent from the verified registry and have no SysEx controls in the UI.</p>
+        </details>
       </section>
     );
   }
@@ -3684,70 +3388,6 @@ function PerformanceControl({
       <input type="number" min={0} max={127} value={value} aria-label={`${control.label} value`} onChange={(event) => onChange(Number(event.target.value))} />
       <small>CC {control.controller}</small>
     </div>
-  );
-}
-
-function HardwareActions({
-  onPanic,
-  onSendModule,
-  onRequestPatch,
-  onSaveToSlot,
-  onClearTemporaryPatch,
-  onClearSelectedUserPatch,
-  selectedModule,
-  selectedPatch,
-  dirtyCount,
-  operationState,
-}: {
-  onPanic: () => void;
-  onSendModule: () => void;
-  onRequestPatch: () => void;
-  onSaveToSlot: () => void;
-  onClearTemporaryPatch: () => void;
-  onClearSelectedUserPatch: () => void;
-  selectedModule: ModuleDefinition;
-  selectedPatch: UserPatch;
-  dirtyCount: number;
-  operationState: OperationState;
-}) {
-  return (
-    <section className="inspector-section" aria-labelledby="hardware-actions-title">
-      <SectionHeader id="hardware-actions-title" title="Hardware Actions" icon={<Circuitry size={16} aria-hidden="true" />} />
-      <div className="action-list">
-        <InspectorAction title="Read mapped patch" detail="Request every mapped parameter" onClick={onRequestPatch} />
-        <InspectorAction title="Send visible parameters" detail={`Push ${selectedModule.shortTitle} to temporary memory`} onClick={onSendModule} />
-        <InspectorAction title={`Save to USER ${selectedPatch.label}`} detail={`Overwrite target slot with ${dirtyCount} pending changes`} onClick={onSaveToSlot} primary />
-        <InspectorAction title="Mute temporary patch" detail="Turn off main effect blocks in temp memory" onClick={onClearTemporaryPatch} />
-        <InspectorAction title={`Clear USER ${selectedPatch.label}`} detail="Overwrite slot with muted temporary patch" onClick={onClearSelectedUserPatch} danger />
-        <InspectorAction title="All notes off" detail="Send CC 120-123 on current channel" onClick={onPanic} danger />
-      </div>
-      <div className={`save-target state-${operationState}`}>
-        <span>Selected target</span>
-        <strong>USER {selectedPatch.label}</strong>
-        <small>Bank MSB {selectedPatch.bankMsb}, PC {selectedPatch.program}</small>
-      </div>
-    </section>
-  );
-}
-
-function InspectorAction({
-  title,
-  detail,
-  primary,
-  danger,
-  onClick,
-}: {
-  title: string;
-  detail: string;
-  primary?: boolean;
-  danger?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button type="button" className={`inspector-action ${primary ? "primary" : ""} ${danger ? "danger" : ""}`} onClick={onClick}>
-      <strong>{title}</strong>
-      <span>{detail}</span>
-    </button>
   );
 }
 
@@ -3849,7 +3489,7 @@ function SelectionInspector({
         <>
           <div className="inspector-explain">
             <strong>{selectedSource.label}</strong>
-            <p>{sourceParam ? parameterSoundImpact(sourceParam) : `${sourceFieldLabel(sourceField)} is not mapped yet for this source.`}</p>
+            <p>{sourceParam ? parameterSoundImpact(sourceParam) : `Mapping needed: ${sourceFieldLabel(sourceField)} has no registry parameter for this source.`}</p>
             <p>{sourceParam ? parameterInspectorDetail(sourceParam, liveWrite) : "No MIDI/SysEx is sent for unmapped source fields."}</p>
             <button type="button" disabled={!sourceDirty || !sourceParam} onClick={() => onRevertSource(selectedSource.id, sourceField)}>
               <ArrowCounterClockwise size={15} aria-hidden="true" />
@@ -4086,7 +3726,10 @@ function SysExLibrary({
       }
 
       try {
-        const input = isTextImport(file.name) ? await file.text() : await file.arrayBuffer();
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const input = isTextImport(file.name) || looksLikeTextSysEx(bytes)
+          ? new TextDecoder().decode(bytes)
+          : bytes;
         const messagesFromFile = parseImportedSysEx(input).map((message, index) => ({
           ...message,
           label: `${file.name} #${index + 1}`,
@@ -4443,15 +4086,33 @@ function moduleIntentSummary(module: ModuleDefinition) {
   }
 }
 
-function moduleIntentControls(module: ModuleDefinition) {
+function moduleIntentControls(module: ModuleDefinition, values?: ParameterValues) {
   const byId = new Map(module.parameters.map((param) => [param.id, param]));
+  const modelingCategory = values?.modelingCategory ?? 0;
+  const activeModelingTypeId =
+    modelingCategory === 1
+      ? "modelingAcousticType"
+      : modelingCategory === 2
+        ? "modelingBassType"
+        : modelingCategory === 3
+          ? "modelingSynthType"
+          : "modelingElectricGuitarType";
   const pick = (id: string, label: string, hint: string) => {
     const param = byId.get(id);
     return param ? { param, label, hint } : null;
   };
 
   const controls =
-    module.id === "amp"
+    module.id === "modeling"
+      ? [
+          pick("modelingSwitch", "Modeling on/off", "Put the modeled tone in or out of the patch."),
+          pick("modelingCategory", "Modeling category", "Choose E.GTR, acoustic, bass, or synth before selecting the model."),
+          pick(activeModelingTypeId, "Active model", "Only the selector for the current modeling category is shown."),
+          pick("modelingLevel", "Modeling level", "Balances the modeled tone against PCM and normal pickup sources."),
+          pick("modelingPitchShift", "Pitch shift", "Moves the modeled tone in semitone steps."),
+          pick("modelingFineShift", "Fine shift", "Fine tune the modeled tone in cents."),
+        ]
+      : module.id === "amp"
       ? [
           pick("ampSwitch", "Amp on/off", "Put the modeled amp in or out of the signal path."),
           pick("ampType", "Amp character", "Choose the broad amp voice before fine tuning."),
@@ -4498,6 +4159,7 @@ function moduleIntentControls(module: ModuleDefinition) {
                     pick("eqLowMidGain", "Low-mid warmth", "Changes thickness and boxiness."),
                     pick("eqHighMidGain", "Presence", "Changes pick attack and edge."),
                     pick("eqHighGain", "Air", "Adds or cuts top end."),
+                    pick("eqLevel", "EQ level", "Trims the final EQ block output."),
                   ]
                 : module.parameters.slice(0, 5).map((param) => ({
                     param,
@@ -4509,9 +4171,18 @@ function moduleIntentControls(module: ModuleDefinition) {
 }
 
 function modulePrimaryValue(module: ModuleDefinition, values: ParameterValues) {
-  const controls = moduleIntentControls(module);
+  const controls = moduleIntentControls(module, values);
   const param = controls.find((item) => item.param.kind === "slider")?.param ?? controls[0]?.param;
   return param ? `${controls.find((item) => item.param === param)?.label ?? param.label}: ${formatParameterValue(param, values[param.id])}` : "No mapped control";
+}
+
+function dependenciesSatisfied(param: ParameterDefinition, values: ParameterValues) {
+  return param.dependencies.every((dependency) => {
+    const current = values[dependency.parameterId];
+    return Array.isArray(dependency.equals)
+      ? dependency.equals.includes(current)
+      : current === dependency.equals;
+  });
 }
 
 function moduleBeforeAfter(module: ModuleDefinition, values: ParameterValues, originalValues: ParameterValues) {
@@ -4693,7 +4364,28 @@ function makeJsonDownloadUrl(data: unknown) {
   return URL.createObjectURL(blob);
 }
 
+function makeBinarySysExDownloadUrl(messages: readonly ImportedSysExMessage[]) {
+  const bytes = Uint8Array.from(messages.flatMap((message) => message.bytes));
+  const blob = new Blob([bytes], { type: "application/octet-stream" });
+  return URL.createObjectURL(blob);
+}
+
 function isTextImport(name: string) {
   const lower = name.toLowerCase();
   return lower.endsWith(".txt") || lower.endsWith(".hex");
+}
+
+function looksLikeTextSysEx(bytes: Uint8Array) {
+  const sample = bytes.slice(0, Math.min(bytes.length, 512));
+  if (!sample.length) {
+    return false;
+  }
+
+  const textish = Array.from(sample).every((byte) => byte === 0x09 || byte === 0x0a || byte === 0x0d || (byte >= 0x20 && byte <= 0x7e));
+  if (!textish) {
+    return false;
+  }
+
+  const text = new TextDecoder().decode(sample).toUpperCase();
+  return text.includes("F0") && text.includes("F7");
 }

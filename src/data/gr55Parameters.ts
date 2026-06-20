@@ -17,6 +17,11 @@ export type ParameterModuleId =
   | "noise";
 
 export type ParameterKind = "toggle" | "slider" | "select";
+export type ParameterUiGroup = "primary" | "advanced" | "string" | "routing" | "send" | "type-specific";
+export type ParameterDependency = {
+  parameterId: string;
+  equals: number | readonly number[];
+};
 export type ParameterSection =
   | "pcm1"
   | "pcm2"
@@ -88,8 +93,10 @@ export type ParameterDefinition = {
   parser: ParameterEncoder;
   serializer: ParameterEncoder;
   uiControl: ParameterKind;
+  uiGroup: ParameterUiGroup;
+  dependencies: readonly ParameterDependency[];
   hardwareVerificationStatus: ParameterVerificationStatus;
-  source?: string;
+  source: string;
   encoder: ParameterEncoder;
 };
 
@@ -105,13 +112,19 @@ type RawParameterDefinition = Omit<
   | "parser"
   | "serializer"
   | "uiControl"
+  | "uiGroup"
+  | "dependencies"
   | "hardwareVerificationStatus"
+  | "source"
 > & {
   section?: ParameterSection;
   displayName?: string;
   type?: ParameterValueType;
   allowedValues?: readonly string[];
+  uiGroup?: ParameterUiGroup;
+  dependencies?: readonly ParameterDependency[];
   hardwareVerificationStatus?: ParameterVerificationStatus;
+  source?: string;
 };
 
 export type ModuleDefinition = {
@@ -207,7 +220,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 80,
         type: "level",
         encoder: "c127",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: index === 1 ? "verified" : "fixture-only",
         source,
       },
       {
@@ -334,7 +347,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 100,
         type: "level" as const,
         encoder: "c127" as const,
-        hardwareVerificationStatus: "fixture-only" as const,
+        hardwareVerificationStatus: index === 1 && stringNumber === 1 ? "verified" as const : "fixture-only" as const,
         source,
       })),
       {
@@ -456,6 +469,8 @@ const RAW_MODULES: RawModuleDefinition[] = [
         options: modelingElectricGuitarTypes,
         defaultValue: 0,
         encoder: "byte",
+        uiGroup: "type-specific",
+        dependencies: [{ parameterId: "modelingCategory", equals: 0 }],
         hardwareVerificationStatus: "fixture-only",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
@@ -468,6 +483,8 @@ const RAW_MODULES: RawModuleDefinition[] = [
         options: modelingAcousticTypes,
         defaultValue: 0,
         encoder: "byte",
+        uiGroup: "type-specific",
+        dependencies: [{ parameterId: "modelingCategory", equals: 1 }],
         hardwareVerificationStatus: "fixture-only",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
@@ -480,6 +497,8 @@ const RAW_MODULES: RawModuleDefinition[] = [
         options: modelingBassTypes,
         defaultValue: 0,
         encoder: "byte",
+        uiGroup: "type-specific",
+        dependencies: [{ parameterId: "modelingCategory", equals: 2 }],
         hardwareVerificationStatus: "fixture-only",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
@@ -492,6 +511,8 @@ const RAW_MODULES: RawModuleDefinition[] = [
         options: modelingSynthTypes,
         defaultValue: 0,
         encoder: "byte",
+        uiGroup: "type-specific",
+        dependencies: [{ parameterId: "modelingCategory", equals: 3 }],
         hardwareVerificationStatus: "fixture-only",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
@@ -536,7 +557,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         defaultValue: 100,
         type: "level" as const,
         encoder: "byte" as const,
-        hardwareVerificationStatus: "fixture-only" as const,
+        hardwareVerificationStatus: stringNumber === 1 ? "verified" as const : "fixture-only" as const,
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       })),
       {
@@ -861,6 +882,8 @@ const RAW_MODULES: RawModuleDefinition[] = [
         step: 1,
         defaultValue: 55,
         encoder: "byte",
+        uiGroup: "type-specific",
+        dependencies: [{ parameterId: "modType", equals: 0 }],
       },
       {
         id: "odDsTone",
@@ -873,6 +896,8 @@ const RAW_MODULES: RawModuleDefinition[] = [
         step: 1,
         defaultValue: 50,
         encoder: "byte",
+        uiGroup: "type-specific",
+        dependencies: [{ parameterId: "modType", equals: 0 }],
       },
       {
         id: "odDsLevel",
@@ -885,6 +910,8 @@ const RAW_MODULES: RawModuleDefinition[] = [
         step: 1,
         defaultValue: 70,
         encoder: "byte",
+        uiGroup: "type-specific",
+        dependencies: [{ parameterId: "modType", equals: 0 }],
       },
     ],
   },
@@ -1095,6 +1122,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         step: 1,
         defaultValue: 45,
         encoder: "byte",
+        hardwareVerificationStatus: "verified",
       },
     ],
   },
@@ -1189,6 +1217,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         unit: "dB",
         defaultValue: 0,
         encoder: "gain20",
+        hardwareVerificationStatus: "verified",
       },
       {
         id: "eqLowMidGain",
@@ -1297,6 +1326,30 @@ export const PARAMETERS = MODULES.flatMap((module) => module.parameters);
 export const PARAMETERS_BY_ADDRESS = new Map(PARAMETERS.map((param) => [addressKey(param.address), param]));
 export const PARAMETERS_BY_ID = new Map(PARAMETERS.map((param) => [param.id, param]));
 export const UNMAPPED_PARAMETER_TODOS = [
+  {
+    id: "assignTargets",
+    section: "assigns",
+    displayName: "Assign target/source byte map",
+    reason: "Assign target/source mappings are not present in the verified temporary-patch registry. Do not expose assign sliders until address, parser and write behavior are verified.",
+  },
+  {
+    id: "modelingTypeSpecificControls",
+    section: "modeling",
+    displayName: "Model-specific COSM controls",
+    reason: "Only modeling category, active model selectors, level, switch, string levels and pitch/fine shift are mapped. Additional model-specific fields need source addresses and USER 73-3 write verification.",
+  },
+  {
+    id: "mfxTypeSpecificControls",
+    section: "mfx",
+    displayName: "MFX algorithm-specific controls",
+    reason: "MFX switch/type/sends are mapped. Algorithm-specific parameter addresses are not verified and must remain mapping todos.",
+  },
+  {
+    id: "modTypeSpecificControls",
+    section: "mod",
+    displayName: "MOD type-specific controls beyond OD/DS",
+    reason: "MOD type plus OD/DS drive/tone/level are mapped. Other MOD type-specific controls need address source and hardware verification before UI exposure.",
+  },
   {
     id: "pcm1PortamentoTime",
     section: "pcm1",
@@ -1468,8 +1521,30 @@ function enrichParameter(module: RawModuleDefinition, param: RawParameterDefinit
     parser: param.encoder,
     serializer: param.encoder,
     uiControl: param.kind,
-    hardwareVerificationStatus: param.hardwareVerificationStatus ?? "verified",
+    uiGroup: param.uiGroup ?? inferParameterGroup(param),
+    dependencies: param.dependencies ?? [],
+    hardwareVerificationStatus: param.hardwareVerificationStatus ?? "fixture-only",
+    source: param.source ?? "GR55_INTERACTION_NOTES.md USER 73-3 mapped read capture",
   };
+}
+
+function inferParameterGroup(param: RawParameterDefinition): ParameterUiGroup {
+  if (/String\dLevel$/.test(param.id)) {
+    return "string";
+  }
+  if (/send/i.test(param.label)) {
+    return "send";
+  }
+  if (/routing|line select|output select/i.test(param.label)) {
+    return "routing";
+  }
+  if (/type|model|character|category/i.test(param.label) && param.kind === "select") {
+    return "primary";
+  }
+  if (/switch|level|gain|time|feedback|threshold|release|tempo/i.test(param.label)) {
+    return "primary";
+  }
+  return "advanced";
 }
 
 function inferParameterType(param: RawParameterDefinition): ParameterValueType {
