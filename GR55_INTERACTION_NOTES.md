@@ -270,8 +270,9 @@ The bridge can miss some RQ1 responses when reading many parameters quickly. The
 ## What Is Still Not Known
 
 - Full patch dump request and restore are not implemented.
-- Patch-name byte addresses are not mapped.
-- PCM tone, modeling tone, normal pickup, GK assign targets and detailed pedal assign bytes are not mapped.
+- Patch-name byte address is mapped at `18:00:00:01` and write/save/read-back verified on USER 73-3.
+- PCM tone, modeling tone and normal pickup source controls are mapped and read-verified as temporary-patch fields; only the representative verified whitelist has write/save/read-back coverage.
+- CTL, EXP, EXP Switch, GK Volume, GK S1/S2 and Assign 1-8 byte fields are mapped from secondary address references. A small representative subset answered USER 73-3 RQ1 reads on 2026-06-20, but new pedal/assign write/save/read-back behavior is not verified.
 - Physical panel/pedal-originated MIDI was monitored but not observed in the current GR-55 USB/MIDI settings.
 - The save response at `0F 00 00 01/02` is observed but not semantically decoded.
 - Clear/delete is not a GR-55 delete command. The current app's clear behavior is a muted temporary patch overwrite and then save.

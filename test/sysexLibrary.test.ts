@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_IMPORT_BYTES,
   classifyImportedSysExMessages,
+  getImportedQueueNormalSaveEligibility,
   parseImportedSysEx,
   serializeMessagesAsHex,
   splitSysExMessages,
@@ -81,6 +82,56 @@ describe("SysEx import library", () => {
     expect(classifyImportedSysExMessages([{ label: "Unknown", bytes: [0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7] }])).toMatchObject({
       kind: "unknown",
       label: "Unknown SysEx queue",
+    });
+  });
+
+  it("allows normal save only for fully mapped imported queues", () => {
+    const mappedMessages = [
+      { label: "Patch level", bytes: makeDataSetMessage([0x18, 0x00, 0x02, 0x30], [0x06, 0x04]) },
+      { label: "Delay switch", bytes: makeDataSetMessage([0x18, 0x00, 0x06, 0x05], [0x01]) },
+    ];
+    const mappedClassification = classifyImportedSysExMessages(mappedMessages, {
+      knownAddressKeys: new Set(["18:00:02:30", "18:00:06:05"]),
+      mappedParameterCount: 4,
+    });
+
+    expect(mappedClassification.kind).toBe("mapped-parameters");
+    expect(getImportedQueueNormalSaveEligibility(mappedClassification)).toMatchObject({
+      canSave: true,
+    });
+  });
+
+  it("rejects normal save for mixed mapped plus unknown queues", () => {
+    const mixedClassification = classifyImportedSysExMessages(
+      [
+        { label: "Patch level", bytes: makeDataSetMessage([0x18, 0x00, 0x02, 0x30], [0x06, 0x04]) },
+        { label: "Unknown GR-55", bytes: makeDataSetMessage([0x18, 0x00, 0x7e, 0x01], [0x01]) },
+      ],
+      {
+        knownAddressKeys: new Set(["18:00:02:30"]),
+        mappedParameterCount: 2,
+      },
+    );
+
+    expect(mixedClassification).toMatchObject({
+      kind: "mapped-parameters",
+      mappedMessages: 1,
+      unknownMessages: 1,
+    });
+    expect(getImportedQueueNormalSaveEligibility(mixedClassification)).toMatchObject({
+      canSave: false,
+      reason: expect.stringContaining("Unknown"),
+    });
+  });
+
+  it("rejects normal save for unknown raw SysEx queues", () => {
+    const unknownClassification = classifyImportedSysExMessages([
+      { label: "Unknown", bytes: [0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7] },
+    ]);
+
+    expect(getImportedQueueNormalSaveEligibility(unknownClassification)).toMatchObject({
+      canSave: false,
+      reason: expect.stringContaining("normal USER save/read-back"),
     });
   });
 

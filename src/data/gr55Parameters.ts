@@ -12,6 +12,8 @@ export type ParameterModuleId =
   | "delay"
   | "reverb"
   | "eq"
+  | "pedal"
+  | "assigns"
   | "amp"
   | "mod"
   | "noise";
@@ -35,6 +37,7 @@ export type ParameterSection =
   | "reverb"
   | "output"
   | "eq"
+  | "pedal"
   | "assigns";
 export type ParameterValueType =
   | "boolean"
@@ -47,7 +50,7 @@ export type ParameterValueType =
   | "percent"
   | "toneNumber"
   | "category";
-export type ParameterVerificationStatus = "verified" | "fixture-only" | "unmapped";
+export type ParameterVerificationStatus = "verified" | "read-verified" | "fixture-only" | "unmapped";
 export type ParameterEncoder =
   | "boolean"
   | "invertedBoolean"
@@ -60,6 +63,7 @@ export type ParameterEncoder =
   | "offset64"
   | "split8"
   | "split12"
+  | "split12Offset1024"
   | "toneNumber3"
   | "gain20"
   | "reverbTime"
@@ -147,6 +151,10 @@ export type ParameterReadMessage = {
 
 const A = {
   common: (offset: number) => [0x18, 0x00, (offset >> 8) & 0x7f, offset & 0x7f] as const,
+  commonPacked: (baseOffset: number, delta = 0) => {
+    const packedOffset = (((baseOffset >> 8) & 0x7f) << 7) + (baseOffset & 0x7f) + delta;
+    return [0x18, 0x00, (packedOffset >> 7) & 0x7f, packedOffset & 0x7f] as const;
+  },
   sends: (offset: number) => [0x18, 0x00, 0x06, offset] as const,
   ampMod: (offset: number) => [0x18, 0x00, 0x07, offset] as const,
   mfx: (offset: number) => [0x18, 0x00, 0x03, offset] as const,
@@ -165,6 +173,94 @@ const modelingElectricGuitarTypes = ["CLA-ST", "MOD-ST", "H&H-ST", "TE", "LP", "
 const modelingAcousticTypes = ["STEEL", "NYLON", "SITAR", "BANJO", "RESO"] as const;
 const modelingBassTypes = ["JB", "PB"] as const;
 const modelingSynthTypes = ["ANALOG GR", "WAVE SYNTH", "FILTER BASS", "CRYSTAL", "ORGAN", "BRASS"] as const;
+const fixtureOnlyPedalAssignSource = "motiz88/gr55-remote RolandGR55AddressMap.ts secondary; USER 73-3 RQ1/write verification pending";
+const rq1ReadVerifiedPedalAssignIds = new Set([
+  "ctlFunction",
+  "expSwitchFunction",
+  "gkS2Function",
+  "assign1Switch",
+  "assign1Target",
+  "assign1Source",
+  "assign7TargetMax",
+  "assign8Source",
+]);
+const ctlFunctionOptions = [
+  "OFF",
+  "HOLD",
+  "TAP TEMPO",
+  "TONE SW",
+  "AMP SW",
+  "MOD SW",
+  "MFX SW",
+  "DELAY SW",
+  "REVERB SW",
+  "CHORUS SW",
+  "AUDIO PLAYER PLAY/STOP",
+  "AUDIO PLAYER SONG INC",
+  "AUDIO PLAYER SONG DEC",
+  "AUDIO PLAYER SW",
+  "V-LINK SW",
+  "LED MOMENT",
+  "LED TOGGLE",
+] as const;
+const pedalContinuousFunctionOptions = [
+  "OFF",
+  "PATCH VOLUME",
+  "TONE VOLUME",
+  "PITCH BEND",
+  "MODULATION",
+  "CROSS FADER",
+  "DELAY LEVEL",
+  "REVERB LEVEL",
+  "CHORUS LEVEL",
+  "MOD CONTROL",
+] as const;
+const pedalGkSwitchFunctionOptions = [
+  "OFF",
+  "TAP TEMPO",
+  "TONE SW",
+  "AMP SW",
+  "MOD SW",
+  "MFX SW",
+  "DELAY SW",
+  "REVERB SW",
+  "CHORUS SW",
+  "AUDIO PLAYER PLAY/STOP",
+  "AUDIO PLAYER SONG INC",
+  "AUDIO PLAYER SONG DEC",
+  "AUDIO PLAYER SW",
+  "V-LINK SW",
+] as const;
+const pedalPolarityOptions = ["OFF", "TOE", "HEEL"] as const;
+const assignSourceOptions = [
+  "CTL",
+  "EXP PEDAL OFF",
+  "EXP PEDAL ON",
+  "EXP PEDAL SW",
+  "INT PDL",
+  "WAVE PDL",
+  "GK S1",
+  "GK S2",
+  "GK VOL",
+  ...Array.from({ length: 31 }, (_, index) => `CC${index + 1}`),
+  ...Array.from({ length: 32 }, (_, index) => `CC${index + 64}`),
+] as readonly string[];
+const assignSourceModeOptions = ["MOMENT", "TOGGLE"] as const;
+const assignInternalPedalTriggerOptions = [
+  "PATCH CHANGE",
+  "CTL",
+  "EXP LOW",
+  "EXP MID",
+  "EXP HIGH",
+  "EXP ON LOW",
+  "EXP ON MID",
+  "EXP ON HIGH",
+  "EXP SW",
+  "GK S1",
+  "GK S2",
+] as const;
+const assignInternalCurveOptions = ["LINEAR", "SLOW RISE", "FAST RISE"] as const;
+const assignWaveFormOptions = ["SAW", "TRI", "SIN"] as const;
 
 function makePcmModule(index: 1 | 2): RawModuleDefinition {
   const id = `pcm${index}` as const;
@@ -189,7 +285,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         options: boolOptions,
         defaultValue: 1,
         encoder: "invertedBoolean",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       {
@@ -204,7 +300,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 1,
         type: "toneNumber",
         encoder: "toneNumber3",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       {
@@ -220,7 +316,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 80,
         type: "level",
         encoder: "c127",
-        hardwareVerificationStatus: index === 1 ? "verified" : "fixture-only",
+        hardwareVerificationStatus: index === 1 ? "verified" : "read-verified",
         source,
       },
       {
@@ -236,7 +332,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 0,
         type: "bipolar",
         encoder: "offset64",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       {
@@ -248,7 +344,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         options: boolOptions,
         defaultValue: 0,
         encoder: "boolean",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       {
@@ -260,7 +356,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         options: boolOptions,
         defaultValue: 0,
         encoder: "boolean",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       {
@@ -275,7 +371,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 0,
         type: "bipolar",
         encoder: "c64",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       {
@@ -291,7 +387,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 0,
         type: "bipolar",
         encoder: "offset64",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       {
@@ -307,7 +403,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 0,
         type: "bipolar",
         encoder: "offset64",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       {
@@ -319,7 +415,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         options: ["OFF", "ON", "TONE"],
         defaultValue: 0,
         encoder: "byte",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       {
@@ -331,7 +427,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         options: ["1", "2"],
         defaultValue: 0,
         encoder: "byte",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       ...([1, 2, 3, 4, 5, 6] as const).map((stringNumber) => ({
@@ -347,7 +443,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 100,
         type: "level" as const,
         encoder: "c127" as const,
-        hardwareVerificationStatus: index === 1 && stringNumber === 1 ? "verified" as const : "fixture-only" as const,
+        hardwareVerificationStatus: index === 1 && stringNumber === 1 ? "verified" as const : "read-verified" as const,
         source,
       })),
       {
@@ -359,7 +455,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         options: routingOptions,
         defaultValue: 1,
         encoder: "byte",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source,
       },
       {
@@ -371,7 +467,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         options: pcmFilterTypeOptions,
         defaultValue: 7,
         encoder: "byte",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchPCMToneOffsetStruct",
       },
       {
@@ -386,7 +482,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 0,
         type: "bipolar",
         encoder: "c63",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchPCMToneOffsetStruct",
       },
       {
@@ -401,7 +497,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 0,
         type: "bipolar",
         encoder: "c64",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchPCMToneOffsetStruct",
       },
       {
@@ -416,7 +512,7 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 0,
         type: "bipolar",
         encoder: "c64",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchPCMToneOffsetStruct",
       },
       {
@@ -431,11 +527,416 @@ function makePcmModule(index: 1 | 2): RawModuleDefinition {
         defaultValue: 0,
         type: "bipolar",
         encoder: "c64",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchPCMToneOffsetStruct",
       },
     ],
   };
+}
+
+function fixturePedalParam(param: RawParameterDefinition): RawParameterDefinition {
+  return {
+    ...param,
+    section: "pedal",
+    hardwareVerificationStatus: rq1ReadVerifiedPedalAssignIds.has(param.id) ? "read-verified" : "fixture-only",
+    source: fixtureOnlyPedalAssignSource,
+  };
+}
+
+function fixtureAssignParam(param: RawParameterDefinition): RawParameterDefinition {
+  return {
+    ...param,
+    section: "assigns",
+    hardwareVerificationStatus: rq1ReadVerifiedPedalAssignIds.has(param.id) ? "read-verified" : "fixture-only",
+    source: fixtureOnlyPedalAssignSource,
+  };
+}
+
+function toggleLayerFields(
+  prefix: string,
+  moduleId: ParameterModuleId,
+  baseOffset: number,
+  startDelta: number,
+  labelPrefix: string,
+) {
+  const layers = [
+    ["Pcm1", "PCM1"],
+    ["Pcm2", "PCM2"],
+    ["Modeling", "Modeling"],
+    ["NormalPu", "Normal PU"],
+  ] as const;
+
+  return layers.flatMap(([idPart, label], index) => [
+    fixturePedalParam({
+      id: `${prefix}Off${idPart}Switch`,
+      moduleId,
+      label: `${labelPrefix}=OFF ${label}`,
+      kind: "toggle",
+      address: A.commonPacked(baseOffset, startDelta + index),
+      options: boolOptions,
+      defaultValue: 0,
+      encoder: "boolean",
+      uiGroup: "routing",
+    }),
+    fixturePedalParam({
+      id: `${prefix}On${idPart}Switch`,
+      moduleId,
+      label: `${labelPrefix}=ON ${label}`,
+      kind: "toggle",
+      address: A.commonPacked(baseOffset, startDelta + 4 + index),
+      options: boolOptions,
+      defaultValue: 1,
+      encoder: "boolean",
+      uiGroup: "routing",
+    }),
+  ]);
+}
+
+function makeContinuousControllerParams(prefix: string, title: string, baseOffset: number): RawParameterDefinition[] {
+  const sourceSwitches = [
+    ["Pcm1", "PCM1", 1],
+    ["Pcm2", "PCM2", 2],
+    ["Modeling", "Modeling", 3],
+    ["NormalPu", "Normal PU", 4],
+  ] as const;
+  const bendSwitches = [
+    ["Pcm1", "PCM1", 6],
+    ["Pcm2", "PCM2", 7],
+    ["Modeling", "Modeling", 8],
+  ] as const;
+  const modulationSwitches = [
+    ["Pcm1", "PCM1", 11],
+    ["Pcm2", "PCM2", 12],
+  ] as const;
+  const xfadePolarity = [
+    ["Pcm1", "PCM1", 13],
+    ["Pcm2", "PCM2", 14],
+    ["Modeling", "Modeling", 15],
+    ["NormalPu", "Normal PU", 16],
+  ] as const;
+
+  return [
+    fixturePedalParam({
+      id: `${prefix}Function`,
+      moduleId: "pedal",
+      label: `${title} Function`,
+      kind: "select",
+      address: A.commonPacked(baseOffset),
+      options: pedalContinuousFunctionOptions,
+      defaultValue: 0,
+      encoder: "byte",
+      uiGroup: "primary",
+    }),
+    ...sourceSwitches.map(([idPart, label, delta]) =>
+      fixturePedalParam({
+        id: `${prefix}Volume${idPart}Switch`,
+        moduleId: "pedal",
+        label: `${title} volume ${label}`,
+        kind: "toggle",
+        address: A.commonPacked(baseOffset, delta),
+        options: boolOptions,
+        defaultValue: 1,
+        encoder: "boolean",
+        uiGroup: "routing",
+      }),
+    ),
+    fixturePedalParam({
+      id: `${prefix}BendRange`,
+      moduleId: "pedal",
+      label: `${title} bend range`,
+      kind: "slider",
+      address: A.commonPacked(baseOffset, 5),
+      min: -12,
+      max: 12,
+      step: 1,
+      unit: "st",
+      defaultValue: 0,
+      type: "bipolar",
+      encoder: "offset24",
+      uiGroup: "advanced",
+    }),
+    ...bendSwitches.map(([idPart, label, delta]) =>
+      fixturePedalParam({
+        id: `${prefix}Bend${idPart}Switch`,
+        moduleId: "pedal",
+        label: `${title} bend ${label}`,
+        kind: "toggle",
+        address: A.commonPacked(baseOffset, delta),
+        options: boolOptions,
+        defaultValue: 1,
+        encoder: "boolean",
+        uiGroup: "routing",
+      }),
+    ),
+    fixturePedalParam({
+      id: `${prefix}ModulationMin`,
+      moduleId: "pedal",
+      label: `${title} modulation min`,
+      kind: "slider",
+      address: A.commonPacked(baseOffset, 9),
+      min: 0,
+      max: 100,
+      step: 1,
+      defaultValue: 0,
+      encoder: "c127",
+      uiGroup: "advanced",
+    }),
+    fixturePedalParam({
+      id: `${prefix}ModulationMax`,
+      moduleId: "pedal",
+      label: `${title} modulation max`,
+      kind: "slider",
+      address: A.commonPacked(baseOffset, 10),
+      min: 0,
+      max: 100,
+      step: 1,
+      defaultValue: 100,
+      encoder: "c127",
+      uiGroup: "advanced",
+    }),
+    ...modulationSwitches.map(([idPart, label, delta]) =>
+      fixturePedalParam({
+        id: `${prefix}Modulation${idPart}Switch`,
+        moduleId: "pedal",
+        label: `${title} modulation ${label}`,
+        kind: "toggle",
+        address: A.commonPacked(baseOffset, delta),
+        options: boolOptions,
+        defaultValue: 1,
+        encoder: "boolean",
+        uiGroup: "routing",
+      }),
+    ),
+    ...xfadePolarity.map(([idPart, label, delta]) =>
+      fixturePedalParam({
+        id: `${prefix}Xfade${idPart}Polarity`,
+        moduleId: "pedal",
+        label: `${title} xfade ${label}`,
+        kind: "select",
+        address: A.commonPacked(baseOffset, delta),
+        options: pedalPolarityOptions,
+        defaultValue: 0,
+        encoder: "byte",
+        uiGroup: "routing",
+      }),
+    ),
+    ...[
+      ["Delay", "Delay Level", 17, 120],
+      ["Reverb", "Reverb Level", 19, 100],
+      ["Chorus", "Chorus Level", 21, 100],
+    ].flatMap(([idPart, label, delta, max]) => [
+      fixturePedalParam({
+        id: `${prefix}${idPart}Min`,
+        moduleId: "pedal",
+        label: `${title} ${label} min`,
+        kind: "slider",
+        address: A.commonPacked(baseOffset, Number(delta)),
+        min: 0,
+        max: Number(max),
+        step: 1,
+        defaultValue: 0,
+        encoder: "byte",
+        uiGroup: "send",
+      }),
+      fixturePedalParam({
+        id: `${prefix}${idPart}Max`,
+        moduleId: "pedal",
+        label: `${title} ${label} max`,
+        kind: "slider",
+        address: A.commonPacked(baseOffset, Number(delta) + 1),
+        min: 0,
+        max: Number(max),
+        step: 1,
+        defaultValue: Number(max),
+        encoder: "byte",
+        uiGroup: "send",
+      }),
+    ]),
+  ];
+}
+
+function makeGkSwitchParams(prefix: string, label: string, baseOffset: number): RawParameterDefinition[] {
+  return [
+    fixturePedalParam({
+      id: `${prefix}Function`,
+      moduleId: "pedal",
+      label: `${label} Function`,
+      kind: "select",
+      address: A.commonPacked(baseOffset),
+      options: pedalGkSwitchFunctionOptions,
+      defaultValue: 0,
+      encoder: "byte",
+      uiGroup: "primary",
+    }),
+    ...toggleLayerFields(prefix, "pedal", baseOffset, 5, label),
+  ];
+}
+
+const assignSlotBaseOffsets = [0x010c, 0x011f, 0x0132, 0x0145, 0x0158, 0x016b, 0x017e, 0x0211] as const;
+
+function makeAssignSlotParams(slot: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8, baseOffset: number): RawParameterDefinition[] {
+  const prefix = `assign${slot}`;
+  const title = `Assign ${slot}`;
+
+  return [
+    fixtureAssignParam({
+      id: `${prefix}Switch`,
+      moduleId: "assigns",
+      label: `${title} Switch`,
+      kind: "toggle",
+      address: A.commonPacked(baseOffset),
+      options: boolOptions,
+      defaultValue: 0,
+      encoder: "boolean",
+      uiGroup: "primary",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}Target`,
+      moduleId: "assigns",
+      label: `${title} Target`,
+      kind: "slider",
+      address: A.commonPacked(baseOffset, 1),
+      min: 0,
+      max: 534,
+      step: 1,
+      defaultValue: 0,
+      encoder: "split12",
+      uiGroup: "primary",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}TargetMin`,
+      moduleId: "assigns",
+      label: `${title} Target Min`,
+      kind: "slider",
+      address: A.commonPacked(baseOffset, 4),
+      min: -1024,
+      max: 1023,
+      step: 1,
+      defaultValue: 0,
+      encoder: "split12Offset1024",
+      uiGroup: "primary",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}TargetMax`,
+      moduleId: "assigns",
+      label: `${title} Target Max`,
+      kind: "slider",
+      address: A.commonPacked(baseOffset, 7),
+      min: -1024,
+      max: 1023,
+      step: 1,
+      defaultValue: 127,
+      encoder: "split12Offset1024",
+      uiGroup: "primary",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}Source`,
+      moduleId: "assigns",
+      label: `${title} Source`,
+      kind: "select",
+      address: A.commonPacked(baseOffset, 10),
+      options: assignSourceOptions,
+      defaultValue: 0,
+      encoder: "byte",
+      uiGroup: "primary",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}SourceMode`,
+      moduleId: "assigns",
+      label: `${title} Source Mode`,
+      kind: "select",
+      address: A.commonPacked(baseOffset, 11),
+      options: assignSourceModeOptions,
+      defaultValue: 0,
+      encoder: "byte",
+      uiGroup: "primary",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}ActiveRangeLow`,
+      moduleId: "assigns",
+      label: `${title} Active Range Low`,
+      kind: "slider",
+      address: A.commonPacked(baseOffset, 12),
+      min: 0,
+      max: 126,
+      step: 1,
+      defaultValue: 0,
+      encoder: "byte",
+      uiGroup: "advanced",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}ActiveRangeHigh`,
+      moduleId: "assigns",
+      label: `${title} Active Range High`,
+      kind: "slider",
+      address: A.commonPacked(baseOffset, 13),
+      min: 1,
+      max: 127,
+      step: 1,
+      defaultValue: 127,
+      encoder: "byte",
+      uiGroup: "advanced",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}InternalPedalTrigger`,
+      moduleId: "assigns",
+      label: `${title} Internal Pedal Trigger`,
+      kind: "select",
+      address: A.commonPacked(baseOffset, 14),
+      options: assignInternalPedalTriggerOptions,
+      defaultValue: 0,
+      encoder: "byte",
+      uiGroup: "advanced",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}InternalPedalTime`,
+      moduleId: "assigns",
+      label: `${title} Internal Pedal Time`,
+      kind: "slider",
+      address: A.commonPacked(baseOffset, 15),
+      min: 0,
+      max: 100,
+      step: 1,
+      defaultValue: 0,
+      encoder: "byte",
+      uiGroup: "advanced",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}InternalPedalCurve`,
+      moduleId: "assigns",
+      label: `${title} Internal Pedal Curve`,
+      kind: "select",
+      address: A.commonPacked(baseOffset, 16),
+      options: assignInternalCurveOptions,
+      defaultValue: 0,
+      encoder: "byte",
+      uiGroup: "advanced",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}WavePedalRate`,
+      moduleId: "assigns",
+      label: `${title} Wave Pedal Rate`,
+      kind: "slider",
+      address: A.commonPacked(baseOffset, 17),
+      min: 0,
+      max: 113,
+      step: 1,
+      defaultValue: 0,
+      encoder: "byte",
+      uiGroup: "advanced",
+    }),
+    fixtureAssignParam({
+      id: `${prefix}WavePedalForm`,
+      moduleId: "assigns",
+      label: `${title} Wave Pedal Form`,
+      kind: "select",
+      address: A.commonPacked(baseOffset, 18),
+      options: assignWaveFormOptions,
+      defaultValue: 0,
+      encoder: "byte",
+      uiGroup: "advanced",
+    }),
+  ];
 }
 
 const RAW_MODULES: RawModuleDefinition[] = [
@@ -457,7 +958,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         defaultValue: 0,
         type: "category",
         encoder: "byte",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
       {
@@ -471,7 +972,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         encoder: "byte",
         uiGroup: "type-specific",
         dependencies: [{ parameterId: "modelingCategory", equals: 0 }],
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
       {
@@ -485,7 +986,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         encoder: "byte",
         uiGroup: "type-specific",
         dependencies: [{ parameterId: "modelingCategory", equals: 1 }],
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
       {
@@ -499,7 +1000,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         encoder: "byte",
         uiGroup: "type-specific",
         dependencies: [{ parameterId: "modelingCategory", equals: 2 }],
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
       {
@@ -513,7 +1014,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         encoder: "byte",
         uiGroup: "type-specific",
         dependencies: [{ parameterId: "modelingCategory", equals: 3 }],
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
       {
@@ -529,7 +1030,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         defaultValue: 80,
         type: "level",
         encoder: "byte",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
       {
@@ -541,7 +1042,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         options: boolOptions,
         defaultValue: 1,
         encoder: "invertedBoolean",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
       ...([1, 2, 3, 4, 5, 6] as const).map((stringNumber) => ({
@@ -557,7 +1058,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         defaultValue: 100,
         type: "level" as const,
         encoder: "byte" as const,
-        hardwareVerificationStatus: stringNumber === 1 ? "verified" as const : "fixture-only" as const,
+        hardwareVerificationStatus: stringNumber === 1 ? "verified" as const : "read-verified" as const,
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       })),
       {
@@ -573,7 +1074,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         defaultValue: 0,
         type: "bipolar",
         encoder: "offset24",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
       {
@@ -589,7 +1090,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         defaultValue: 0,
         type: "bipolar",
         encoder: "offset50",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap PatchModelingToneStruct",
       },
     ],
@@ -609,7 +1110,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         options: routingOptions,
         defaultValue: 1,
         encoder: "byte",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap common.lineSelectNormalPU",
       },
       {
@@ -621,7 +1122,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         options: boolOptions,
         defaultValue: 1,
         encoder: "invertedBoolean",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap common.normalPuMute",
       },
       {
@@ -637,7 +1138,7 @@ const RAW_MODULES: RawModuleDefinition[] = [
         defaultValue: 80,
         type: "level",
         encoder: "byte",
-        hardwareVerificationStatus: "fixture-only",
+        hardwareVerificationStatus: "read-verified",
         source: "RolandGR55AddressMap common.normalPuLevel",
       },
     ],
@@ -685,6 +1186,118 @@ const RAW_MODULES: RawModuleDefinition[] = [
         encoder: "byte",
       },
     ],
+  },
+  {
+    id: "pedal",
+    title: "Pedal / GK Controls",
+    shortTitle: "PEDAL",
+    tone: "olive",
+    parameters: [
+      fixturePedalParam({
+        id: "ctlStatus",
+        moduleId: "pedal",
+        label: "CTL Status",
+        kind: "toggle",
+        address: A.commonPacked(0x0011),
+        options: boolOptions,
+        defaultValue: 0,
+        encoder: "boolean",
+        uiGroup: "primary",
+      }),
+      fixturePedalParam({
+        id: "ctlFunction",
+        moduleId: "pedal",
+        label: "CTL Function",
+        kind: "select",
+        address: A.commonPacked(0x0011, 1),
+        options: ctlFunctionOptions,
+        defaultValue: 0,
+        encoder: "byte",
+        uiGroup: "primary",
+      }),
+      fixturePedalParam({
+        id: "ctlHoldType",
+        moduleId: "pedal",
+        label: "CTL Hold Type",
+        kind: "select",
+        address: A.commonPacked(0x0011, 2),
+        options: ["1", "2", "3", "4"],
+        defaultValue: 0,
+        encoder: "byte",
+        uiGroup: "advanced",
+      }),
+      fixturePedalParam({
+        id: "ctlHoldSwitchMode",
+        moduleId: "pedal",
+        label: "CTL Hold Switch Mode",
+        kind: "select",
+        address: A.commonPacked(0x0011, 3),
+        options: ["LATCH", "MOMENT"],
+        defaultValue: 0,
+        encoder: "byte",
+        uiGroup: "advanced",
+      }),
+      fixturePedalParam({
+        id: "ctlHoldPcmTone1",
+        moduleId: "pedal",
+        label: "CTL Hold PCM1",
+        kind: "toggle",
+        address: A.commonPacked(0x0011, 4),
+        options: boolOptions,
+        defaultValue: 0,
+        encoder: "boolean",
+        uiGroup: "routing",
+      }),
+      fixturePedalParam({
+        id: "ctlHoldPcmTone2",
+        moduleId: "pedal",
+        label: "CTL Hold PCM2",
+        kind: "toggle",
+        address: A.commonPacked(0x0011, 5),
+        options: boolOptions,
+        defaultValue: 0,
+        encoder: "boolean",
+        uiGroup: "routing",
+      }),
+      ...toggleLayerFields("ctl", "pedal", 0x0011, 6, "CTL"),
+      ...makeContinuousControllerParams("expOff", "EXP pedal off", 0x001f),
+      ...makeContinuousControllerParams("expOn", "EXP pedal on", 0x0036),
+      fixturePedalParam({
+        id: "expSwitchStatus",
+        moduleId: "pedal",
+        label: "EXP Switch Status",
+        kind: "toggle",
+        address: A.commonPacked(0x004d),
+        options: boolOptions,
+        defaultValue: 0,
+        encoder: "boolean",
+        uiGroup: "primary",
+      }),
+      fixturePedalParam({
+        id: "expSwitchFunction",
+        moduleId: "pedal",
+        label: "EXP Switch Function",
+        kind: "select",
+        address: A.commonPacked(0x004d, 1),
+        options: pedalGkSwitchFunctionOptions,
+        defaultValue: 0,
+        encoder: "byte",
+        uiGroup: "primary",
+      }),
+      ...toggleLayerFields("expSwitch", "pedal", 0x004d, 6, "EXP Switch"),
+      ...makeContinuousControllerParams("gkVolume", "GK volume", 0x005b),
+      ...makeGkSwitchParams("gkS1", "GK S1", 0x0072),
+      ...makeGkSwitchParams("gkS2", "GK S2", 0x007f),
+    ],
+  },
+  {
+    id: "assigns",
+    title: "Assigns 1-8",
+    shortTitle: "ASSIGN",
+    tone: "slate",
+    parameters: assignSlotBaseOffsets.flatMap((baseOffset, index) =>
+      makeAssignSlotParams((index + 1) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8, baseOffset),
+    ),
   },
   {
     id: "amp",
@@ -1404,6 +2017,8 @@ export function encodeParameterValue(param: ParameterDefinition, value: number) 
       return encodeSplit8(value, param.min ?? 0, param.max ?? 255);
     case "split12":
       return encodeSplit12(value, param.min ?? 0, param.max ?? 4095);
+    case "split12Offset1024":
+      return encodeSplit12(value + 1024, (param.min ?? -1024) + 1024, (param.max ?? 1023) + 1024);
     default:
       return encodeByte(value, param.min ?? 0, param.max ?? 127);
   }
@@ -1447,6 +2062,12 @@ export function decodeParameterValue(param: ParameterDefinition, bytes: readonly
         param.min ?? 0,
         param.max ?? 4095,
       );
+    case "split12Offset1024":
+      return clamp(
+        ((((bytes[0] ?? 0) & 0x0f) << 8) | (((bytes[1] ?? 0) & 0x0f) << 4) | ((bytes[2] ?? 0) & 0x0f)) - 1024,
+        param.min ?? -1024,
+        param.max ?? 1023,
+      );
     case "byte":
     default:
       return clamp(bytes[0] ?? param.defaultValue, param.min ?? 0, param.max ?? 127);
@@ -1478,6 +2099,7 @@ export function parameterDataSize(param: ParameterDefinition) {
     case "split8":
       return [0x00, 0x00, 0x00, 0x02];
     case "split12":
+    case "split12Offset1024":
     case "toneNumber3":
       return [0x00, 0x00, 0x00, 0x03];
     case "boolean":
@@ -1523,7 +2145,7 @@ function enrichParameter(module: RawModuleDefinition, param: RawParameterDefinit
     uiControl: param.kind,
     uiGroup: param.uiGroup ?? inferParameterGroup(param),
     dependencies: param.dependencies ?? [],
-    hardwareVerificationStatus: param.hardwareVerificationStatus ?? "fixture-only",
+    hardwareVerificationStatus: param.hardwareVerificationStatus ?? "read-verified",
     source: param.source ?? "GR55_INTERACTION_NOTES.md USER 73-3 mapped read capture",
   };
 }
@@ -1584,6 +2206,7 @@ function parameterDataSizeForEncoder(encoder: ParameterEncoder) {
     case "split8":
       return [0x00, 0x00, 0x00, 0x02] as const;
     case "split12":
+    case "split12Offset1024":
     case "toneNumber3":
       return [0x00, 0x00, 0x00, 0x03] as const;
     default:

@@ -854,7 +854,7 @@ textarea {
 .workspace-grid {
   min-height: 0;
   display: grid;
-  grid-template-columns: 282px minmax(560px, 1fr) 318px;
+  grid-template-columns: 252px minmax(620px, 1fr) 342px;
   overflow: hidden;
 }
 
@@ -1501,9 +1501,9 @@ input[type="number"] {
 .patch-identity {
   display: grid;
   grid-template-columns: minmax(150px, auto) minmax(220px, 1fr) auto;
-  gap: 10px 16px;
+  gap: 8px 12px;
   align-items: center;
-  padding: 13px 16px 12px;
+  padding: 9px 12px;
 }
 
 .patch-title-group span {
@@ -1552,15 +1552,15 @@ input[type="number"] {
 }
 
 .patch-map-section {
-  padding: 16px;
+  padding: 10px 12px;
 }
 
 .patch-map-heading {
   display: flex;
   align-items: end;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 12px;
+  gap: 12px;
+  margin-bottom: 8px;
 }
 
 .patch-map-heading h2 {
@@ -1598,10 +1598,10 @@ input[type="number"] {
 }
 
 .patch-source-node {
-  min-height: 48px;
+  min-height: 40px;
   display: grid;
   gap: 1px;
-  padding: 7px 9px;
+  padding: 6px 8px;
   border-color: var(--separator);
   background: var(--surface);
 }
@@ -1728,7 +1728,7 @@ input[type="number"] {
 }
 
 .source-mixer {
-  padding: 14px 16px 8px;
+  padding: 10px 12px 6px;
 }
 
 .source-grid {
@@ -1741,10 +1741,10 @@ input[type="number"] {
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
+  gap: 6px;
   align-items: stretch;
   border-bottom: 1px solid var(--separator);
-  padding: 12px 0;
+  padding: 8px 0;
   background: transparent;
 }
 
@@ -1964,15 +1964,15 @@ input[type="number"] {
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  min-height: 42px;
+  min-height: 34px;
   display: flex;
   align-items: stretch;
-  gap: 10px;
+  gap: 7px;
   overflow-x: auto;
   overflow-y: hidden;
   box-sizing: border-box;
   contain: paint;
-  padding: 6px 16px 7px;
+  padding: 4px 12px 5px;
   background: var(--surface);
 }
 
@@ -1998,14 +1998,14 @@ input[type="number"] {
 
 .module-tabs button {
   min-width: auto;
-  min-height: 29px;
+  min-height: 24px;
   display: grid;
   grid-template-columns: 8px auto;
   gap: 0 6px;
   align-items: center;
   border: 0;
   border-radius: var(--radius-sm);
-  padding: 3px 8px;
+  padding: 2px 7px;
   color: var(--muted);
   background: transparent;
   text-align: left;
@@ -2049,7 +2049,7 @@ input[type="number"] {
 }
 
 .focused-editor {
-  padding: 16px;
+  padding: 10px 12px;
 }
 
 .empty-focused-editor {
@@ -2087,8 +2087,8 @@ input[type="number"] {
   display: flex;
   align-items: start;
   justify-content: space-between;
-  gap: 14px;
-  padding-bottom: 12px;
+  gap: 10px;
+  padding-bottom: 8px;
 }
 
 .focused-header > strong {
@@ -2109,20 +2109,20 @@ input[type="number"] {
 
 .simple-editor-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 16px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 6px 12px;
   border-top: 1px solid var(--separator);
-  padding-top: 12px;
+  padding-top: 8px;
 }
 
 .intent-control-row {
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(126px, 0.78fr) minmax(160px, 1fr) 28px;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
   border-bottom: 1px solid var(--separator);
-  padding: 8px 0;
+  padding: 5px 0;
 }
 
 .intent-control-row.is-dirty {
@@ -2206,12 +2206,12 @@ input[type="number"] {
 }
 
 .module-header {
-  min-height: 58px;
+  min-height: 44px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  padding: 13px 16px 12px;
+  gap: 10px;
+  padding: 9px 12px;
   border-bottom: 1px solid var(--separator);
 }
 
@@ -2449,11 +2449,11 @@ input[type="number"] {
   position: relative;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(160px, 0.9fr) minmax(240px, 1.2fr) minmax(260px, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(145px, 0.85fr) minmax(220px, 1.25fr) minmax(220px, 1fr);
+  gap: 8px;
   align-items: center;
   border-top: 1px solid var(--separator);
-  padding: 9px 16px;
+  padding: 6px 12px;
   background: transparent;
 }
 
@@ -2952,7 +2952,7 @@ input[type="number"] {
 
 .next-step-panel {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .next-step-panel > strong {
@@ -3057,7 +3057,7 @@ input[type="number"] {
   gap: 10px;
   align-items: baseline;
   border-bottom: 1px solid var(--separator);
-  padding: 6px 0;
+  padding: 4px 0;
 }
 
 .next-action-card dt {

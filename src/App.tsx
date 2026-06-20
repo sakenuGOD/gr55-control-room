@@ -28,6 +28,8 @@ import {
   type ParameterModuleId,
 } from "./data/gr55Parameters";
 import { StringMatrix } from "./components/editor/StringMatrix";
+import { AssignsProgrammer } from "./components/editor/AssignsProgrammer";
+import { PedalControlPanel } from "./components/editor/PedalControlPanel";
 import { PatchManager } from "./components/librarian/PatchManager";
 import { StudioToolbar, type CommandPaletteCommand } from "./components/layout/StudioToolbar";
 import { USER_PATCHES, type UserPatch } from "./data/gr55PatchMap";
@@ -59,6 +61,7 @@ import {
   serializeMessagesAsHex,
   validateImportFileMeta,
   classifyImportedSysExMessages,
+  getImportedQueueNormalSaveEligibility,
   type ImportedSysExMessage,
   type SysExQueueClassification,
 } from "./lib/sysexLibrary";
@@ -71,6 +74,7 @@ import {
 } from "./lib/readProgress";
 import { parseMappedPatchMessages } from "./lib/patchImport";
 import type { UsbPacketMode } from "./lib/usbMidi";
+import type { AssignSourceId, AssignStageSuccess, PhysicalAssignControl } from "./lib/actions/assigns";
 
 type ParameterValues = Record<string, number>;
 type TransportMode = "bridge" | "midi" | "usb";
@@ -170,6 +174,11 @@ const PERFORMANCE_CONTROLS: PerformanceControlDefinition[] = [
   { id: "hold", label: "Hold", controller: 64, kind: "toggle", defaultValue: 0 },
   { id: "ctl", label: "CTL pedal", controller: 80, kind: "toggle", defaultValue: 0 },
 ];
+const PERFORMANCE_CONTROL_BY_ASSIGN_SOURCE: Partial<Record<AssignSourceId, string>> = {
+  expPedal: "expression",
+  gkVolume: "gkVolume",
+  ctlPedal: "ctl",
+};
 
 const SOURCE_DEFINITIONS: SourceDefinition[] = [
   {
@@ -309,8 +318,8 @@ const EDITOR_TABS: EditorTabDefinition[] = [
   { id: "reverb", label: "Reverb", moduleId: "reverb", group: "effects" },
   { id: "eq", label: "EQ/Output", moduleId: "eq", group: "effects" },
   { id: "noise", label: "Noise Suppressor", moduleId: "noise", group: "effects" },
-  { id: "assigns", label: "Assigns", group: "assigns" },
-  { id: "pedal", label: "Pedal/GK", group: "assigns" },
+  { id: "assigns", label: "Assigns", moduleId: "assigns", group: "assigns" },
+  { id: "pedal", label: "Pedal/GK", moduleId: "pedal", group: "assigns" },
   { id: "sysex", label: "SysEx/MCP", group: "debug" },
 ];
 
@@ -991,6 +1000,16 @@ export function App() {
     [liveWrite, originalValues, setParameter],
   );
 
+  const stageAssignMapping = useCallback(
+    (result: AssignStageSuccess) => {
+      result.staged.forEach((change) => setParameter(change.param, change.value, false));
+      setReadStatus(
+        `Assign ${result.slot} staged: ${result.source.label} to ${result.target.displayName}. ${result.staged.length} fixture-only assign write${result.staged.length === 1 ? "" : "s"} pending Send Staged/Save.`,
+      );
+    },
+    [setParameter],
+  );
+
   const sendModule = useCallback(
     (module: ModuleDefinition) => {
       if (!patchLoaded) {
@@ -1310,19 +1329,27 @@ export function App() {
         return;
       }
 
+      const loadAsBaseline = !patchLoaded;
       if (Object.keys(parsed.values).length) {
         setValues((current) => ({ ...current, ...parsed.values }));
-        setOriginalValues((current) => ({ ...current, ...parsed.values }));
+        if (loadAsBaseline) {
+          setOriginalValues((current) => ({ ...current, ...parsed.values }));
+        }
         setPatchLoaded(true);
       }
 
       if (parsed.patchName !== undefined) {
         setPatchName(parsed.patchName);
-        setOriginalPatchName(parsed.patchName);
-        setPatchNameStatus("loaded");
+        if (loadAsBaseline) {
+          setOriginalPatchName(parsed.patchName);
+        }
+        setPatchNameStatus(loadAsBaseline || parsed.patchName === originalPatchName ? "loaded" : "dirty");
         setPatchNameError("");
         if (slotSelectionConfirmed) {
-          updateSelectedSlotRecord(selectedPatch, { status: "loaded", name: parsed.patchName });
+          updateSelectedSlotRecord(selectedPatch, {
+            status: loadAsBaseline || parsed.patchName === originalPatchName ? "loaded" : "dirty",
+            name: parsed.patchName,
+          });
         }
       }
 
@@ -1331,10 +1358,12 @@ export function App() {
       setReadStatus(
         `Imported SysEx parsed ${parsed.mappedMessages} mapped parameter${parsed.mappedMessages === 1 ? "" : "s"}${
           parsed.patchName !== undefined ? ` and patch name "${parsed.patchName}"` : ""
-        }. ${parsed.checksumErrors ? `${parsed.checksumErrors} checksum error${parsed.checksumErrors === 1 ? "" : "s"} ignored.` : ""}`,
+        }. ${loadAsBaseline ? "Loaded as mapped baseline because no USER slot read is active." : "Staged as mapped preview against the current USER readback."} ${
+          parsed.checksumErrors ? `${parsed.checksumErrors} checksum error${parsed.checksumErrors === 1 ? "" : "s"} ignored.` : ""
+        }`,
       );
     },
-    [selectedPatch, slotSelectionConfirmed, updateSelectedSlotRecord],
+    [originalPatchName, patchLoaded, selectedPatch, slotSelectionConfirmed, updateSelectedSlotRecord],
   );
 
   const importFromRawHex = useCallback(() => {
@@ -1401,29 +1430,16 @@ export function App() {
       return;
     }
 
-    if (
-      !window.confirm(
-        `Send ${importedMessages.length} imported SysEx ${importedMessages.length === 1 ? "message" : "messages"} to temporary memory, then overwrite USER ${selectedPatch.label}?`,
-      )
-    ) {
+    const eligibility = getImportedQueueNormalSaveEligibility(queueClassification);
+    if (!eligibility.canSave) {
+      setLibraryError(eligibility.reason);
+      setReadStatus(`${eligibility.reason} Use Send to temp from the SysEx utility drawer only when you intentionally want an unsaved temporary test.`);
       return;
     }
 
-    showOperationPulse("sending");
-    for (const message of importedMessages) {
-      sendToRoland(message.bytes, message.label);
-      await delay(PARAMETER_WRITE_SEND_DELAY_MS);
-    }
-
-    await delay(160);
-    const sent = sendToRoland(makeSaveUserPatchMessage(selectedPatch.userIndex, deviceId), `Save imported queue to USER ${selectedPatch.label}`);
-    showOperationPulse(sent ? "saved" : "error");
-    setReadStatus(
-      sent
-        ? `Imported SysEx queue sent to temporary memory and save command sent for USER ${selectedPatch.label}.`
-        : "Imported queue was not saved because the save command did not leave the app.",
-    );
-  }, [deviceId, importedMessages, requireSelectedSlot, selectedPatch, sendToRoland, showOperationPulse]);
+    setLibraryError("");
+    await sendSaveToSelectedPatch();
+  }, [importedMessages.length, queueClassification, requireSelectedSlot, sendSaveToSelectedPatch]);
 
   const exportImportedQueue = useCallback(() => {
     if (!importedMessages.length) {
@@ -1907,6 +1923,7 @@ export function App() {
               performanceValues={performanceValues}
               controls={PERFORMANCE_CONTROLS}
               onPerformanceChange={setPerformanceControl}
+              onStageAssignMapping={stageAssignMapping}
               onReadModule={() => void requestModule(activeModule)}
               onOpenSysEx={() => setActiveTabId("sysex")}
             />
@@ -2360,7 +2377,7 @@ function IntentPatchMap({
       <div className="patch-map-heading">
         <div>
           <h2 id="patch-map-title">Patch map</h2>
-          <p>Sources and effects shown here are backed by mapped temporary-patch parameters; fixture-only badges mean write behavior has not been individually hardware-verified.</p>
+          <p>Sources and effects shown here are backed by mapped temporary-patch parameters; read-verified means USER 73-3 RQ1/readback coverage, fixture-only means secondary mapping still needs hardware verification.</p>
         </div>
         <span>{MODULES.flatMap((module) => module.parameters).length} mapped controls</span>
       </div>
@@ -2429,7 +2446,7 @@ function SourceMixer({
   return (
     <section className="source-mixer" aria-labelledby="source-mixer-title">
       <SectionHeader id="source-mixer-title" title="Sound sources" icon={<FadersHorizontal size={16} aria-hidden="true" />} />
-      <p className="mapping-note">PCM, modeling and normal pickup controls below are wired to temporary-patch SysEx addresses. USER 73-3 read verification passed; fixture-only badges mark controls that still need individual write verification.</p>
+      <p className="mapping-note">PCM, modeling and normal pickup controls below are wired to temporary-patch SysEx addresses. Read-verified badges mark USER 73-3 read coverage; fixture-only badges still need hardware verification.</p>
       <div className="source-grid">
         {sources.map((source) => {
           const sourceSelected = selection.type === "source" && selection.sourceId === source.id;
@@ -2539,7 +2556,7 @@ function SourceMappedControl({
         {dirty ? <em className="dirty-badge">Staged</em> : null}
       </div>
       {control}
-      <small>{param.hardwareVerificationStatus === "verified" ? "verified" : "fixture-only"}</small>
+      <small>{verificationLabel(param.hardwareVerificationStatus)}</small>
       {selected && hud ? <ValueHud hud={hud} /> : null}
     </div>
   );
@@ -3232,6 +3249,7 @@ function SpecialTabPanel({
   performanceValues,
   controls,
   onPerformanceChange,
+  onStageAssignMapping,
   onReadModule,
   onOpenSysEx,
 }: {
@@ -3242,31 +3260,45 @@ function SpecialTabPanel({
   performanceValues: ParameterValues;
   controls: PerformanceControlDefinition[];
   onPerformanceChange: (control: PerformanceControlDefinition, value: number) => void;
+  onStageAssignMapping: (result: AssignStageSuccess) => void;
   onReadModule: () => void;
   onOpenSysEx: () => void;
 }) {
-  if (tabId === "pedal" || tabId === "assigns") {
+  if (tabId === "pedal") {
+    const pedalValues: Partial<Record<AssignSourceId, number>> = {
+      expPedal: performanceValues.expression,
+      gkVolume: performanceValues.gkVolume,
+      ctlPedal: performanceValues.ctl,
+    };
+    const handlePedalControlChange = (control: PhysicalAssignControl, value: number) => {
+      const performanceId = PERFORMANCE_CONTROL_BY_ASSIGN_SOURCE[control.id];
+      const performanceControl = performanceId ? controls.find((item) => item.id === performanceId) : null;
+      if (performanceControl) {
+        onPerformanceChange(performanceControl, value);
+      }
+    };
+
     return (
-      <section className="module-editor special-panel" aria-labelledby="pedal-panel-title">
-        <div className="module-header">
-          <div>
-            <span>{tabId === "pedal" ? "Mapped CC" : "Mapping needed"}</span>
-            <h2 id="pedal-panel-title">Pedal, GK and assigns</h2>
-          </div>
-          <button type="button" onClick={onReadModule}>Read current module</button>
-        </div>
-        <PerformancePanel controls={controls} values={performanceValues} onChange={onPerformanceChange} />
-        {tabId === "assigns" ? (
-          <details className="mapping-needed" open>
-            <summary>Developer mapping needed</summary>
-            <ul>
-              {UNMAPPED_PARAMETER_TODOS.filter((todo) => todo.section === "assigns").map((todo) => (
-                <li key={todo.id}>{todo.displayName}: {todo.reason}</li>
-              ))}
-            </ul>
-          </details>
-        ) : null}
-      </section>
+      <PedalControlPanel
+        values={pedalValues}
+        onControlChange={handlePedalControlChange}
+      />
+    );
+  }
+
+  if (tabId === "assigns") {
+    return (
+      <>
+        <AssignsProgrammer onStageMapping={onStageAssignMapping} />
+        <details className="mapping-needed" open>
+          <summary>Developer mapping notes</summary>
+          <ul>
+            {UNMAPPED_PARAMETER_TODOS.filter((todo) => todo.section === "assigns").map((todo) => (
+              <li key={todo.id}>{todo.displayName}: {todo.reason}</li>
+            ))}
+          </ul>
+        </details>
+      </>
     );
   }
 
@@ -3471,19 +3503,19 @@ function SelectionInspector({
           <dl className="inspector-dl">
             <InspectorRow label="Module" value={moduleTitle(selectedParameter.moduleId)} />
             <InspectorRow label="Current value" value={formatParameterValue(selectedParameter, values[selectedParameter.id])} />
+            <InspectorRow label="Original value" value={formatParameterValue(selectedParameter, originalValues[selectedParameter.id])} />
+            <InspectorRow label="Dirty" value={parameterDirty ? "Dirty / staged" : "Clean"} />
             <InspectorRow label="Before / after" value={parameterDirty ? `${formatParameterValue(selectedParameter, originalValues[selectedParameter.id])} to ${formatParameterValue(selectedParameter, values[selectedParameter.id])}` : "Unchanged"} />
             <InspectorRow label="Range / unit" value={formatParameterRange(selectedParameter)} />
+            <InspectorRow label="Verification" value={verificationLabel(selectedParameter.hardwareVerificationStatus)} />
+            <InspectorRow label="Address" value={toHex(selectedParameter.address)} code />
+            <InspectorRow label="Data size" value={parameterDataSizeLabel(selectedParameter)} />
+            <InspectorRow label="Last sent" value={lastSentByParameter[selectedParameter.id] ?? "Not sent this session"} />
+            <InspectorRow label="Readback" value={operationState === "saved" ? "Last save read-back completed" : parameterDirty ? "Pending save/read-back" : "No pending change"} />
+            <InspectorRow label="Source" value={selectedParameter.source ?? "local registry"} />
             <InspectorRow label="Send behavior" value={liveWrite ? "Live Preview sends while editing" : "Staged until Send Staged"} />
             <InspectorRow label="Save behavior" value={`Save writes USER ${selectedPatch.label}.`} />
           </dl>
-          <details className="inspector-advanced">
-            <summary>Advanced SysEx</summary>
-            <dl className="inspector-dl">
-              <InspectorRow label="Address" value={toHex(selectedParameter.address)} code />
-              <InspectorRow label="Data size" value={parameterDataSizeLabel(selectedParameter)} />
-              <InspectorRow label="Last sent" value={lastSentByParameter[selectedParameter.id] ?? "Not sent this session"} />
-            </dl>
-          </details>
         </>
       ) : selectedSource && sourceField ? (
         <>
@@ -3500,23 +3532,19 @@ function SelectionInspector({
             <InspectorRow label="Block" value={selectedSource.block} />
             <InspectorRow label="Field" value={sourceFieldLabel(sourceField)} />
             <InspectorRow label="Current value" value={sourceParam ? formatParameterValue(sourceParam, sourceCurrentValue ?? sourceParam.defaultValue) : "unmapped"} />
+            <InspectorRow label="Original value" value={sourceParam ? formatParameterValue(sourceParam, sourceOriginalValue ?? sourceParam.defaultValue) : "unmapped"} />
+            <InspectorRow label="Dirty" value={sourceDirty ? "Dirty / staged" : "Clean"} />
             <InspectorRow label="Before / after" value={sourceParam && sourceDirty ? `${formatParameterValue(sourceParam, sourceOriginalValue ?? sourceParam.defaultValue)} to ${formatParameterValue(sourceParam, sourceCurrentValue ?? sourceParam.defaultValue)}` : "Unchanged"} />
             <InspectorRow label="Range / unit" value={sourceParam ? formatParameterRange(sourceParam) : "unmapped"} />
-            <InspectorRow label="Verification" value={sourceParam?.hardwareVerificationStatus ?? "unmapped"} />
+            <InspectorRow label="Verification" value={sourceParam ? verificationLabel(sourceParam.hardwareVerificationStatus) : "unmapped"} />
+            <InspectorRow label="Address" value={sourceParam ? toHex(sourceParam.address) : "unmapped"} code={Boolean(sourceParam)} />
+            <InspectorRow label="Data size" value={sourceParam ? parameterDataSizeLabel(sourceParam) : "unmapped"} />
+            <InspectorRow label="Last sent" value={sourceParam ? lastSentByParameter[sourceParam.id] ?? "Not sent this session" : "unmapped"} />
+            <InspectorRow label="Readback" value={operationState === "saved" ? "Last save read-back completed" : sourceDirty ? "Pending save/read-back" : "No pending change"} />
+            <InspectorRow label="Source" value={sourceParam?.source ?? "mapping needed"} />
             <InspectorRow label="Send behavior" value={sourceParam ? (liveWrite ? "Live Preview sends temporary DT1 while editing" : "Staged until Send Staged") : "Unmapped. No MIDI/SysEx is sent."} />
             <InspectorRow label="Save behavior" value={sourceParam ? `Included in save/read-back workflow for USER ${selectedPatch.label}.` : "Not saved. Requires a confirmed GR-55 source address map."} />
           </dl>
-          {sourceParam ? (
-            <details className="inspector-advanced">
-              <summary>Advanced SysEx</summary>
-              <dl className="inspector-dl">
-                <InspectorRow label="Address" value={toHex(sourceParam.address)} code />
-                <InspectorRow label="Data size" value={parameterDataSizeLabel(sourceParam)} />
-                <InspectorRow label="Parser" value={sourceParam.parser} />
-                <InspectorRow label="Source" value={sourceParam.source ?? "local registry"} />
-              </dl>
-            </details>
-          ) : null}
         </>
       ) : selectedModule ? (
         <>
@@ -3711,6 +3739,7 @@ function SysExLibrary({
   onExportQueue: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const normalSaveEligibility = getImportedQueueNormalSaveEligibility(queueClassification);
 
   async function handleFiles(files: FileList | null) {
     if (!files?.length) {
@@ -3766,13 +3795,14 @@ function SysExLibrary({
           Load file
         </button>
         <button type="button" onClick={onSendQueue} disabled={!messages.length}>Send to temp</button>
-        <button type="button" onClick={onSendQueueToPatch} disabled={!messages.length}>Temp then save</button>
+        <button type="button" onClick={onSendQueueToPatch} disabled={!messages.length || !normalSaveEligibility.canSave}>Save mapped preview</button>
         <button type="button" onClick={onExportQueue} disabled={!messages.length}>Export raw queue</button>
         <button type="button" onClick={onClearQueue} disabled={!messages.length}>Clear</button>
       </div>
       <div className={`queue-classification queue-${queueClassification.kind}`}>
         <strong>{queueClassification.label}</strong>
         <span>{queueClassification.detail}</span>
+        {!normalSaveEligibility.canSave ? <span>{normalSaveEligibility.reason}</span> : null}
       </div>
       {error ? <p className="inline-error" role="alert">{error}</p> : null}
       <div className="library-list">
@@ -3967,6 +3997,20 @@ function formatPlainValue(value: number, unit: string) {
 function readableParameterName(param: ParameterDefinition) {
   const shortTitle = moduleShortTitle(param.moduleId);
   return param.label.toLowerCase().startsWith(shortTitle.toLowerCase()) ? param.label : `${shortTitle} ${param.label}`;
+}
+
+function verificationLabel(status: ParameterDefinition["hardwareVerificationStatus"]) {
+  switch (status) {
+    case "verified":
+      return "verified write/save/read-back";
+    case "read-verified":
+      return "read-verified";
+    case "fixture-only":
+      return "fixture-only / hardware pending";
+    case "unmapped":
+    default:
+      return "unmapped";
+  }
 }
 
 function parameterDescription(param: ParameterDefinition) {

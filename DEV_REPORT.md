@@ -2,6 +2,12 @@
 
 ## Scope Delivered
 
+- Current mapped registry size: 324 parameters.
+- Hardware status split:
+  - `verified`: 5 write/save/read-back verified controls.
+  - `read-verified`: 112 read-verified controls.
+  - `fixture-only`: 207 secondary-source or not-yet-hardware-verified controls.
+  - `unmapped`: kept in `UNMAPPED_PARAMETER_TODOS`, not exposed as working controls.
 - Patch name is mapped at temporary patch address `18 00 00 01`, length 16 ASCII bytes.
 - Patch name RQ1/DT1 helpers validate printable ASCII, encode padded bytes, decode read-back bytes, and are covered by tests.
 - USER Patch Manager still lists all 297 USER slots and now tracks slot states: `unread`, `reading`, `loaded`, `dirty`, `saved`, `error`.
@@ -11,16 +17,34 @@
 - Import parses mapped DT1 messages into editor state, including patch name and mapped parameter values. The raw queue remains visible for inspection/send.
 - Export mapped patch now writes readable SysEx text, binary mapped `.syx` and parsed mapped JSON. This is not a full raw bulk backup.
 - Text/binary SysEx import autodetection handles readable hex text and binary SysEx payloads.
-- The UI now has a simplified studio toolbar, Patch Manager, command palette, grouped module navigation and a mapped String Matrix.
+- The UI now has a simplified studio toolbar, Patch Manager, command palette, grouped module navigation, mapped String Matrix, Assigns Programmer and Pedal/GK panel.
 - A local MCP stdio server exists in `scripts/gr55-mcp-server.mjs` with hardware mode through the native bridge and mock mode through `GR55_MCP_MOCK=1`.
+- Raw unknown SysEx import queues are no longer allowed to use the normal temp-then-save flow. Normal save is mapped-preview-only and still requires the existing save/read-back workflow.
 
 ## Newly Mapped Source Controls
 
-USER 73-3 hardware read verification passed for the mapped source set on 2026-06-20. Controls that still show `fixture-only` are not fake; the address read back from the GR-55, but that individual write behavior has not been tested for every control.
+USER 73-3 hardware read verification passed for the mapped source set on 2026-06-20. Controls marked `read-verified` answered RQ1/readback but are not write/save/read-back verified. Controls marked `fixture-only` are secondary-source mappings or not-yet-tested fields and must not be called verified.
 
 - PCM1 / PCM2: on/off, PCM tone number, level, octave shift, chromatic, nuance switch, pan, coarse tune, fine tune, portamento switch, release mode, string 1-6 levels, output select, filter type, cutoff offset, resonance offset, TVA attack offset, TVA release offset.
 - Modeling/COSM: guitar-mode category, E.GTR model, acoustic model, E.BASS model, synth model, level, on/off, string 1-6 levels, pitch shift, fine shift.
 - Normal PU: routing, on/off, level.
+
+## Newly Mapped Pedal / Assign Controls
+
+The registry now includes patch-level CTL, EXP pedal off/on, EXP switch, GK volume, GK S1, GK S2 and Assign 1-8 byte fields. These addresses came from the secondary `motiz88/gr55-remote` address map and are marked `fixture-only` unless this pass read-verified the exact address on USER 73-3.
+
+USER 73-3 non-destructive RQ1 read verification passed for:
+
+- `ctlFunction` `18:00:00:12`
+- `expSwitchFunction` `18:00:00:4E`
+- `gkS2Function` `18:00:00:7F`
+- `assign1Switch` `18:00:01:0C`
+- `assign1Target` `18:00:01:0D`
+- `assign1Source` `18:00:01:16`
+- `assign7TargetMax` `18:00:02:05`
+- `assign8Source` `18:00:02:1B`
+
+No pedal/assign DT1 write, USER save, or restore was performed in this pass.
 
 ## Still Unmapped / Not Claimed
 
@@ -28,7 +52,7 @@ USER 73-3 hardware read verification passed for the mapped source set on 2026-06
 - Full USER bank backup/restore.
 - Real `.g5l` librarian semantics.
 - SMF event parsing for `.mid` / `.midi`; current import scans raw SysEx byte ranges only.
-- Assign target/source mappings.
+- Full assign target/source coverage. A practical subset is mapped for staged Assign Programmer writes, but most target enum coverage and all pedal/assign write behavior still need hardware verification.
 - PCM1 / PCM2 Portamento Time. Secondary addresses `18:00:20:0D` and `18:00:21:0D` did not answer single USER 73-3 RQ1 checks, so they were removed from working controls and added to `UNMAPPED_PARAMETER_TODOS`.
 - Model-specific COSM controls beyond the core mapped modeling fields above.
 - Patch-level sends/routing fields not present in the mapped registry.
@@ -47,19 +71,22 @@ Official Roland docs confirm the patch architecture, tone categories and paramet
 
 ## Verification Run
 
-- `npm test`: 7 files, 55 tests passed after the MCP, registry metadata and UI refactor changes.
-- `npm run build`: TypeScript and Vite production build passed after the MCP, registry metadata and UI refactor changes.
+- `npm test -- --run`: 10 files, 75 tests passed after the desktop programming pass.
+- `npm run build`: TypeScript and Vite production build passed after the desktop programming pass.
 - `git diff --check`: passed.
 - MCP stdio smoke:
-  - `GR55_MCP_MOCK=1 node scripts/gr55-mcp-server.mjs` returned the 19-tool catalog.
+  - `GR55_MCP_MOCK=1 node scripts/gr55-mcp-server.mjs` returns the expanded tool catalog.
   - Hardware-mode `gr55_connect` returned bridge `ready`.
   - Hardware-mode `gr55_get_patch_name` returned `GHOSTLY`.
 - Browser checks on `http://127.0.0.1:5173/`:
-  - Desktop and mobile loaded.
+  - Desktop `1440x950` loaded.
+  - Narrow `390x844` loaded without document-level horizontal overflow; mobile UX was not a priority in this pass.
   - No visible `Not mapped yet`, `Unmapped source stub`, or design-stub text.
-  - No detected text/control overflow in checked desktop `1440x900` or mobile `390x844` viewports.
+  - No detected document-level horizontal overflow in checked desktop or narrow viewports.
   - `Cmd/Ctrl+K` command palette opens with read/save/connect/reset/export/SysEx/identity commands.
   - String Matrix renders 6 string rows plus explicit developer mapping-needed notes for unavailable per-string pitch/routing fields.
+  - Assigns Programmer renders 8 fixture-only mapped assign rows.
+  - Pedal/GK panel renders direct CC controls where available and mapping-needed readouts for EXP switch/GK S1/GK S2 direct live send.
 - UI hardware pass on `http://127.0.0.1:5173/` with Native Bridge running:
   - Selected `USER 73-3` through Patch Manager.
   - UI completed `Mapped read complete for USER 73-3: 109/109`.

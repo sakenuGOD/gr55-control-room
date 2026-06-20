@@ -312,3 +312,49 @@
 - Clear USER slot by muted overwrite.
 - Import queue send/save.
 - Per-control write/save/read-back for every mapped parameter outside the five representative controls listed above.
+
+## 2026-06-20 20:06 MSK, Pedal / Assign RQ1 Read Verification
+
+- App route: Vite dev server at `http://127.0.0.1:5173/`.
+- Connection route: Native Bridge over `ws://127.0.0.1:5174`.
+- GR-55 detected: yes.
+- Endpoint set: `cfg 1 / if 2 / alt 0 / out 3 / in 2`.
+- Safe USER slot: `USER 73-3`.
+- USER index: `218`; Bank MSB `1`; Program `90` (`0x5A`).
+- Patch name read from hardware: `GHOSTLY`.
+
+### Actions Tested
+
+- Selected `USER 73-3`:
+  - `B0 00 01`
+  - `C0 5A`
+- Sent non-destructive RQ1 reads for newly mapped pedal/assign bytes only.
+- No DT1 writes were sent for these new pedal/assign addresses.
+- No USER save command was sent in this pass.
+
+### RQ1 Results
+
+| Parameter | Address | Data | Checksum |
+| --- | --- | --- | --- |
+| `ctlFunction` | `18:00:00:12` | `06` | valid |
+| `expSwitchFunction` | `18:00:00:4E` | `00` | valid |
+| `gkS2Function` | `18:00:00:7F` | `00` | valid |
+| `assign1Switch` | `18:00:01:0C` | `00` | valid |
+| `assign1Target` | `18:00:01:0D` | `00 00 00` | valid |
+| `assign1Source` | `18:00:01:16` | `00` | valid |
+| `assign7TargetMax` | `18:00:02:05` | `04 00 01` | valid |
+| `assign8Source` | `18:00:02:1B` | `00` | valid |
+
+### Pass / Fail Notes
+
+- PASS: New 7-bit packed address helper reached assign fields crossing the `0x7F` byte boundary.
+- PASS: Representative CTL, EXP switch, GK S2, Assign 1, Assign 7 and Assign 8 fields answered RQ1 on USER 73-3.
+- PASS: These exact fields may be marked `read-verified`.
+- PARTIAL: Remaining new pedal/assign fields stay `fixture-only`.
+- NOT VERIFIED: No pedal/assign write/save/read-back behavior was tested.
+
+### Not Tested Intentionally
+
+- DT1 writes for CTL/EXP/GK/Assign fields.
+- Save/restore workflow for new pedal/assign mappings.
+- Full Assign target enum coverage.

@@ -53,3 +53,72 @@
 - Assign target/source mapping.
 - Save response semantic decoding for `0F 00 00 01` and `0F 00 00 02`.
 - Full per-parameter write/save/read-back verification beyond the current verified whitelist.
+
+## 2026-06-20 Codex Desktop Programming Pass
+
+### Scope Shift
+
+- Mobile UX was explicitly deprioritized. This pass focused on a dense desktop editor/control surface.
+- Primary goal was real GR-55 programming coverage through UI and MCP, especially strings, source layers, pedals/GK controls, assigns and save/read-back safety.
+
+### Changes Made
+
+- Expanded `src/data/gr55Parameters.ts` from 109 working mapped controls to 324 mapped registry parameters:
+  - 111 pedal/GK/CTL/EXP fields.
+  - 104 Assign 1-8 fields.
+  - Existing source/effect modules now distinguish `verified`, `read-verified`, `fixture-only` and `unmapped`.
+- Added `read-verified` status. The `verified` whitelist remains limited to write/save/read-back verified controls:
+  - `pcm1Level`
+  - `pcm1String1Level`
+  - `modelingString1Level`
+  - `delayLevel`
+  - `eqLowGain`
+- Added `split12Offset1024` encoding for assign target min/max.
+- Replaced the old CC-only Assigns/Pedal surface with:
+  - `AssignsProgrammer`
+  - `PedalControlPanel`
+  - registry-backed `pedal` and `assigns` modules.
+- Added pure action layers:
+  - `src/lib/actions/stringMatrix.ts`
+  - `src/lib/actions/assigns.ts`
+- Upgraded String Matrix to a registry-derived model with mute, safe solo, restore, copy row to all, normalize and percent scaling.
+- Expanded MCP tools beyond generic parameter set/get with string matrix, assign/control, save-with-readback and import-preview tools.
+- Fixed raw import safety:
+  - Unknown/unmapped raw SysEx queues can be sent to temporary memory only from the utility drawer.
+  - Normal USER save is allowed only for mapped import previews and goes through mapped save/read-back.
+  - The previous normal `Temp then save` raw queue path was removed.
+- Inspector now always shows selected parameter/source address, data size, current/original value, dirty state, verification status, last sent and read-back context.
+- Desktop CSS was tightened for denser studio/editor use: narrower sidebars, denser tabs, shorter module headers and more compact parameter rows.
+
+### Hardware Verification
+
+- Hardware was available through Native Bridge.
+- Safe slot: `USER 73-3`, selected with Bank MSB `1`, Program `90`.
+- Patch name read-back: `GHOSTLY`.
+- Non-destructive RQ1 read verification passed for these new pedal/assign fields:
+  - `ctlFunction` at `18:00:00:12`, data `06`.
+  - `expSwitchFunction` at `18:00:00:4E`, data `00`.
+  - `gkS2Function` at `18:00:00:7F`, data `00`.
+  - `assign1Switch` at `18:00:01:0C`, data `00`.
+  - `assign1Target` at `18:00:01:0D`, data `00 00 00`.
+  - `assign1Source` at `18:00:01:16`, data `00`.
+  - `assign7TargetMax` at `18:00:02:05`, data `04 00 01`.
+  - `assign8Source` at `18:00:02:1B`, data `00`.
+- No write/save/read-back was attempted for new pedal/assign fields in this pass.
+
+### Verification
+
+- `npm test -- --run`: 10 files, 75 tests passed.
+- `npm run build`: TypeScript and Vite production build passed.
+- Browser smoke:
+  - Desktop `1440x950`: String Matrix, Assigns Programmer and Pedal/GK panel rendered with no document-level horizontal overflow.
+  - Narrow `390x844`: app visible, no document-level horizontal overflow. Mobile UX was not optimized in this pass.
+- Hardware bridge status: GR-55 USB ready at `cfg 1 / if 2 / alt 0 / out 3 / in 2`.
+
+### Remaining Backlog
+
+- Write/save/read-back verification for the new pedal/GK/assign bytes.
+- More complete and hardware-verified assign target enum coverage.
+- Full raw Roland bulk patch dump/restore and full USER bank backup/restore.
+- MOD/MFX/model-specific deeper controls beyond current mapped surface.
+- Save response semantic decoding for `0F 00 00 01` and `0F 00 00 02`.

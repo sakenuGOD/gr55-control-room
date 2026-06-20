@@ -16,6 +16,7 @@ import { USER_PATCHES, type UserPatch } from "../data/gr55PatchMap";
 import { addressKey } from "../lib/midiMessages";
 import { parseMappedPatchMessages, type ParsedMappedPatchMessages } from "../lib/patchImport";
 import {
+  PATCH_NAME_ADDRESS,
   makePatchNameReadMessage,
   makePatchNameWriteMessage,
   validatePatchName,
@@ -153,10 +154,57 @@ const REQUIRED_TOOL_NAMES = [
   "gr55_list_parameters",
   "gr55_list_unmapped_todos",
   "gr55_safety_report",
+  "gr55_list_controls",
+  "gr55_list_strings",
+  "gr55_get_string_matrix",
+  "gr55_set_string_level",
+  "gr55_mute_string",
+  "gr55_restore_string",
+  "gr55_normalize_strings",
+  "gr55_list_assigns",
+  "gr55_get_assign",
+  "gr55_stage_assign",
+  "gr55_list_physical_controls",
+  "gr55_list_assign_targets",
+  "gr55_stage_control_mapping",
+  "gr55_save_with_readback",
+  "gr55_import_preview",
 ] as const;
 
 type ToolName = (typeof REQUIRED_TOOL_NAMES)[number];
 type ToolHandler = (context: McpContext, args: JsonObject) => Promise<unknown>;
+type StringSourceId = "pcm1" | "pcm2" | "modeling";
+type StringSourceSelection = StringSourceId | "all";
+type PhysicalControlKind = "knob" | "toggle";
+
+type PhysicalControlDefinition = {
+  id: string;
+  label: string;
+  controller: number;
+  kind: PhysicalControlKind;
+  defaultValue: number;
+};
+
+type ParameterChange = {
+  param: ParameterDefinition;
+  value: number;
+};
+
+const MCP_TOOL_TIMEOUT_MS = 30_000;
+const STRING_NUMBERS = [1, 2, 3, 4, 5, 6] as const;
+const STRING_SOURCE_IDS = ["pcm1", "pcm2", "modeling"] as const;
+const STRING_SOURCE_LABELS: Record<StringSourceId, string> = {
+  pcm1: "PCM Tone 1",
+  pcm2: "PCM Tone 2",
+  modeling: "Modeling Tone",
+};
+const PHYSICAL_CONTROLS: readonly PhysicalControlDefinition[] = [
+  { id: "expression", label: "EXP pedal", controller: 11, kind: "knob", defaultValue: 0 },
+  { id: "gkVolume", label: "GK volume", controller: 7, kind: "knob", defaultValue: 100 },
+  { id: "modWheel", label: "MOD wheel", controller: 1, kind: "knob", defaultValue: 0 },
+  { id: "hold", label: "Hold", controller: 64, kind: "toggle", defaultValue: 0 },
+  { id: "ctl", label: "CTL pedal", controller: 80, kind: "toggle", defaultValue: 0 },
+];
 
 const stringSchema = (description?: string): JsonSchema => ({ type: "string", description });
 const numberSchema = (description?: string): JsonSchema => ({ type: "number", description });
@@ -316,6 +364,129 @@ const toolSchemas: Record<ToolName, Pick<McpTool, "description" | "inputSchema" 
     inputSchema: objectSchema(),
     outputSchema: objectSchema({}, [], true),
   },
+  gr55_list_controls: {
+    description: "List mapped, safe-to-program GR-55 controls from the verified registry.",
+    inputSchema: objectSchema({
+      section: stringSchema("Optional registry section filter."),
+      moduleId: stringSchema("Optional module id filter."),
+      uiGroup: stringSchema("Optional UI group filter."),
+    }),
+    outputSchema: objectSchema({
+      controls: arraySchema(objectSchema({}, [], true)),
+    }, ["controls"], true),
+  },
+  gr55_list_strings: {
+    description: "List mapped per-string level controls for PCM1, PCM2 and Modeling sources.",
+    inputSchema: objectSchema(),
+    outputSchema: objectSchema({
+      strings: arraySchema(objectSchema({}, [], true)),
+      sources: arraySchema(objectSchema({}, [], true)),
+    }, ["strings", "sources"], true),
+  },
+  gr55_get_string_matrix: {
+    description: "Read the mapped per-string level matrix through the bridge.",
+    inputSchema: objectSchema(),
+    outputSchema: objectSchema({
+      rows: arraySchema(objectSchema({}, [], true)),
+      sources: arraySchema(objectSchema({}, [], true)),
+    }, ["rows", "sources"], true),
+  },
+  gr55_set_string_level: {
+    description: "Stage or send one mapped string level for one source, or all sources on a string.",
+    inputSchema: objectSchema({
+      string: numberSchema("String number, 1 through 6."),
+      source: { type: "string", enum: ["pcm1", "pcm2", "modeling", "all"] },
+      value: numberSchema("Decoded level, clamped to the mapped parameter range."),
+      mode: { type: "string", enum: ["staged", "live"] },
+    }, ["string", "value"]),
+    outputSchema: objectSchema({}, [], true),
+  },
+  gr55_mute_string: {
+    description: "Stage or send level 0 for all mapped sources on one string.",
+    inputSchema: objectSchema({
+      string: numberSchema("String number, 1 through 6."),
+      mode: { type: "string", enum: ["staged", "live"] },
+    }, ["string"]),
+    outputSchema: objectSchema({}, [], true),
+  },
+  gr55_restore_string: {
+    description: "Stage or send the last-read original mapped levels for one string.",
+    inputSchema: objectSchema({
+      string: numberSchema("String number, 1 through 6."),
+      mode: { type: "string", enum: ["staged", "live"] },
+    }, ["string"]),
+    outputSchema: objectSchema({}, [], true),
+  },
+  gr55_normalize_strings: {
+    description: "Stage or send a uniform level for all mapped string-level controls.",
+    inputSchema: objectSchema({
+      value: numberSchema("Decoded level. Defaults to 100."),
+      mode: { type: "string", enum: ["staged", "live"] },
+    }),
+    outputSchema: objectSchema({}, [], true),
+  },
+  gr55_list_assigns: {
+    description: "Report assign-programming availability. Assign target/source bytes remain unmapped.",
+    inputSchema: objectSchema(),
+    outputSchema: objectSchema({
+      assigns: arraySchema(objectSchema({}, [], true)),
+    }, ["assigns"], true),
+  },
+  gr55_get_assign: {
+    description: "Get a mapped assign slot when assign mappings become verified; currently rejects as unmapped.",
+    inputSchema: objectSchema({
+      assign: numberSchema("Assign number, 1 through 8."),
+    }, ["assign"]),
+    outputSchema: objectSchema({}, [], true),
+  },
+  gr55_stage_assign: {
+    description: "Stage an assign mapping only when its target is mapped and assign bytes are verified; currently rejects.",
+    inputSchema: objectSchema({
+      assign: numberSchema("Assign number, 1 through 8."),
+      targetId: stringSchema("Mapped parameter id to target."),
+      value: numberSchema("Optional target value or range endpoint."),
+    }, ["assign", "targetId"]),
+    outputSchema: objectSchema({}, [], true),
+  },
+  gr55_list_physical_controls: {
+    description: "List physical MIDI CC controls known to the control room.",
+    inputSchema: objectSchema(),
+    outputSchema: objectSchema({
+      controls: arraySchema(objectSchema({}, [], true)),
+    }, ["controls"], true),
+  },
+  gr55_list_assign_targets: {
+    description: "List mapped parameter ids that may be safe assign targets once assign bytes are verified.",
+    inputSchema: objectSchema(),
+    outputSchema: objectSchema({
+      targets: arraySchema(objectSchema({}, [], true)),
+    }, ["targets"], true),
+  },
+  gr55_stage_control_mapping: {
+    description: "Stage a physical-control-to-target mapping only when assign bytes are verified; currently rejects.",
+    inputSchema: objectSchema({
+      controlId: stringSchema("Physical control id."),
+      targetId: stringSchema("Mapped parameter id to target."),
+    }, ["controlId", "targetId"]),
+    outputSchema: objectSchema({}, [], true),
+  },
+  gr55_save_with_readback: {
+    description: "Save temporary memory to the selected USER slot and report readback verification.",
+    inputSchema: objectSchema({
+      bank: numberSchema("Must match the selected USER bank when provided."),
+      slot: numberSchema("Must match the selected USER slot when provided."),
+      safety: booleanSchema("Required true flag for destructive save."),
+    }, ["safety"]),
+    outputSchema: objectSchema({}, [], true),
+  },
+  gr55_import_preview: {
+    description: "Parse and classify imported SysEx without sending or mutating current patch state.",
+    inputSchema: objectSchema({
+      content: stringSchema("Hex text or base64 SysEx payload."),
+      encoding: { type: "string", enum: ["hex", "base64"] },
+    }, ["content"]),
+    outputSchema: objectSchema({}, [], true),
+  },
 };
 
 const TOOL_DEFINITIONS: McpTool[] = REQUIRED_TOOL_NAMES.map((name) => ({
@@ -426,6 +597,21 @@ const TOOL_HANDLERS: Record<ToolName, ToolHandler> = {
     todos: UNMAPPED_PARAMETER_TODOS,
   }),
   gr55_safety_report: async (context) => safetyReport(context),
+  gr55_list_controls: async (_context, args) => listControls(args),
+  gr55_list_strings: async () => listStrings(),
+  gr55_get_string_matrix: async (context) => getStringMatrix(context),
+  gr55_set_string_level: async (context, args) => setStringLevel(context, args),
+  gr55_mute_string: async (context, args) => muteString(context, args),
+  gr55_restore_string: async (context, args) => restoreString(context, args),
+  gr55_normalize_strings: async (context, args) => normalizeStrings(context, args),
+  gr55_list_assigns: async () => listAssigns(),
+  gr55_get_assign: async (_context, args) => getAssign(args),
+  gr55_stage_assign: async (_context, args) => stageAssign(args),
+  gr55_list_physical_controls: async () => listPhysicalControls(),
+  gr55_list_assign_targets: async () => listAssignTargets(),
+  gr55_stage_control_mapping: async (_context, args) => stageControlMapping(args),
+  gr55_save_with_readback: async (context, args) => saveUserPatch(context, args),
+  gr55_import_preview: async (_context, args) => importPreview(args),
 };
 
 export function createMockBridge(options: MockBridgeOptions = {}): MockBridge {
@@ -549,7 +735,7 @@ export async function callMcpTool(context: McpContext, name: string, args: unkno
     throw new Error(`Unknown GR-55 MCP tool: ${name}`);
   }
 
-  return (await TOOL_HANDLERS[name](context, asObject(args))) as JsonObject;
+  return (await withTimeout(TOOL_HANDLERS[name](context, asObject(args)), `GR-55 MCP tool ${name}`)) as JsonObject;
 }
 
 async function selectUserPatch(context: McpContext, patch: UserPatch) {
@@ -594,6 +780,234 @@ async function readMappedParameters(context: McpContext, patch: UserPatch) {
     mappedCount: PARAMETERS.length,
     values: cloneValues(context.values),
   };
+}
+
+function listControls(args: JsonObject) {
+  const section = optionalString(args, "section");
+  const moduleId = optionalString(args, "moduleId");
+  const uiGroup = optionalString(args, "uiGroup");
+  const controls = PARAMETERS.filter((param) =>
+    (section === undefined || param.section === section) &&
+    (moduleId === undefined || param.moduleId === moduleId) &&
+    (uiGroup === undefined || param.uiGroup === uiGroup)
+  );
+
+  return {
+    ok: true,
+    count: controls.length,
+    controls: controls.map(parameterMetadata),
+  };
+}
+
+function listStrings() {
+  return {
+    ok: true,
+    count: STRING_NUMBERS.length,
+    sources: stringSourceMetadata(),
+    strings: STRING_NUMBERS.map((stringNumber) => ({
+      string: stringNumber,
+      controls: stringLevelParameters(stringNumber, "all").map(parameterMetadata),
+    })),
+  };
+}
+
+async function getStringMatrix(context: McpContext) {
+  await assertConnected(context);
+
+  for (const stringNumber of STRING_NUMBERS) {
+    for (const param of stringLevelParameters(stringNumber, "all")) {
+      const value = await context.bridge.readParameter(param);
+      context.values[param.id] = value;
+      context.originalValues[param.id] = value;
+    }
+  }
+
+  return {
+    ok: true,
+    count: STRING_NUMBERS.length,
+    sources: stringSourceMetadata(),
+    rows: stringMatrixRows(context.values),
+  };
+}
+
+async function setStringLevel(context: McpContext, args: JsonObject) {
+  await assertConnected(context);
+  const stringNumber = requireStringNumber(args);
+  const source = optionalStringSource(args);
+  const value = requiredNumber(args, "value");
+  const mode = optionalWriteMode(args);
+  const result = await applyParameterChanges(
+    context,
+    stringLevelParameters(stringNumber, source).map((param) => ({ param, value })),
+    mode,
+  );
+
+  return {
+    ...result,
+    string: stringNumber,
+    source,
+  };
+}
+
+async function muteString(context: McpContext, args: JsonObject) {
+  await assertConnected(context);
+  const stringNumber = requireStringNumber(args);
+  const mode = optionalWriteMode(args);
+  const result = await applyParameterChanges(
+    context,
+    stringLevelParameters(stringNumber, "all").map((param) => ({ param, value: 0 })),
+    mode,
+  );
+
+  return {
+    ...result,
+    string: stringNumber,
+    source: "all",
+  };
+}
+
+async function restoreString(context: McpContext, args: JsonObject) {
+  await assertConnected(context);
+  const stringNumber = requireStringNumber(args);
+  const mode = optionalWriteMode(args);
+  const result = await applyParameterChanges(
+    context,
+    stringLevelParameters(stringNumber, "all").map((param) => ({
+      param,
+      value: context.originalValues[param.id] ?? param.defaultValue,
+    })),
+    mode,
+  );
+
+  return {
+    ...result,
+    string: stringNumber,
+    source: "all",
+  };
+}
+
+async function normalizeStrings(context: McpContext, args: JsonObject) {
+  await assertConnected(context);
+  const value = optionalNumber(args, "value") ?? 100;
+  const mode = optionalWriteMode(args);
+  const result = await applyParameterChanges(
+    context,
+    STRING_NUMBERS.flatMap((stringNumber) =>
+      stringLevelParameters(stringNumber, "all").map((param) => ({ param, value })),
+    ),
+    mode,
+  );
+
+  return {
+    ...result,
+    source: "all",
+  };
+}
+
+async function applyParameterChanges(context: McpContext, changes: readonly ParameterChange[], mode: string) {
+  const normalized = changes.map(({ param, value }) => ({
+    param,
+    value: normalizeParameterValue(param, value),
+  }));
+
+  if (mode === "staged") {
+    for (const { param, value } of normalized) {
+      context.values[param.id] = value;
+      context.stagedValues[param.id] = value;
+    }
+
+    return {
+      ok: true,
+      staged: true,
+      changedCount: normalized.length,
+      changed: normalized.map(parameterChangeMetadata),
+    };
+  }
+
+  if (mode !== "live") {
+    throw new Error(`Unsupported parameter write mode: ${mode}`);
+  }
+
+  let sentCount = 0;
+  let ok = true;
+  for (const { param, value } of normalized) {
+    const sent = await context.bridge.send(parameterWriteMessage(context, param, value), parameterWriteLabel(param, value));
+    if (!sent.ok) {
+      ok = false;
+      continue;
+    }
+
+    sentCount += 1;
+    await context.bridge.writeParameter(param, value);
+    context.values[param.id] = value;
+    delete context.stagedValues[param.id];
+  }
+
+  return {
+    ok,
+    staged: false,
+    sentCount,
+    changedCount: normalized.length,
+    changed: normalized.map(parameterChangeMetadata),
+  };
+}
+
+function listAssigns() {
+  const todo = assignTodo();
+  return {
+    ok: true,
+    count: 0,
+    assigns: [],
+    assignMappingsAvailable: false,
+    unmappedTodo: todo,
+    reason: todo.reason,
+  };
+}
+
+function getAssign(args: JsonObject) {
+  const assign = requireAssignNumber(args);
+  throw new Error(`Assign ${assign} is unavailable: ${assignUnavailableReason()}`);
+}
+
+function stageAssign(args: JsonObject) {
+  requireAssignNumber(args);
+  requireParameter(requiredString(args, "targetId"));
+  if (args.value !== undefined) {
+    requiredNumber(args, "value");
+  }
+
+  throw new Error(assignUnavailableReason());
+}
+
+function listPhysicalControls() {
+  return {
+    ok: true,
+    count: PHYSICAL_CONTROLS.length,
+    controls: PHYSICAL_CONTROLS.map((control) => ({
+      ...control,
+      min: 0,
+      max: 127,
+    })),
+  };
+}
+
+function listAssignTargets() {
+  return {
+    ok: true,
+    count: PARAMETERS.length,
+    assignMappingsAvailable: false,
+    targets: PARAMETERS.map((param) => ({
+      ...parameterMetadata(param),
+      targetId: param.id,
+    })),
+    unmappedTodo: assignTodo(),
+  };
+}
+
+function stageControlMapping(args: JsonObject) {
+  requirePhysicalControl(requiredString(args, "controlId"));
+  requireParameter(requiredString(args, "targetId"));
+  throw new Error(assignUnavailableReason());
 }
 
 async function sendStaged(context: McpContext) {
@@ -711,20 +1125,16 @@ function exportMappedPatch(context: McpContext, format: string) {
 
 async function importSysEx(context: McpContext, args: JsonObject) {
   await assertConnected(context);
-  const content = requiredString(args, "content");
-  const encoding = optionalString(args, "encoding") ?? "hex";
-  const messages =
-    encoding === "base64"
-      ? parseImportedSysEx(base64ToBytes(content))
-      : encoding === "hex"
-        ? parseImportedSysEx(content)
-        : (() => {
-            throw new Error(`Unsupported import encoding: ${encoding}`);
-          })();
+  const messages = parseImportMessagesFromArgs(args);
+  const classification = classifyImportMessages(messages);
 
   if (args.send === true) {
     if (args.safety !== true) {
       throw new Error("Sending imported SysEx requires an explicit safety flag.");
+    }
+
+    if (classification.unknownMessages > 0) {
+      throw new Error("Sending unmapped or unknown SysEx through MCP is blocked; use gr55_import_preview and mapped tools instead.");
     }
 
     for (const message of messages) {
@@ -732,10 +1142,6 @@ async function importSysEx(context: McpContext, args: JsonObject) {
     }
   }
 
-  const classification = classifyImportedSysExMessages(messages, {
-    knownAddressKeys: new Set(PARAMETERS_BY_ADDRESS.keys()),
-    mappedParameterCount: PARAMETERS.length,
-  });
   const parsed = await context.bridge.importSysEx(messages);
 
   if (parsed.patchName !== undefined) {
@@ -752,6 +1158,43 @@ async function importSysEx(context: McpContext, args: JsonObject) {
     parsed,
     messageCount: messages.length,
   };
+}
+
+function importPreview(args: JsonObject) {
+  const messages = parseImportMessagesFromArgs(args);
+  const classification = classifyImportMessages(messages);
+  const parsed = parseMappedPatchMessages(messages);
+
+  return {
+    ok: true,
+    classification,
+    parsed,
+    messageCount: messages.length,
+    wouldSend: false,
+    safeToSendMapped: classification.unknownMessages === 0 && parsed.checksumErrors === 0 && classification.mappedMessages > 0,
+  };
+}
+
+function parseImportMessagesFromArgs(args: JsonObject) {
+  const content = requiredString(args, "content");
+  const encoding = optionalString(args, "encoding") ?? "hex";
+
+  if (encoding === "base64") {
+    return parseImportedSysEx(base64ToBytes(content));
+  }
+
+  if (encoding === "hex") {
+    return parseImportedSysEx(content);
+  }
+
+  throw new Error(`Unsupported import encoding: ${encoding}`);
+}
+
+function classifyImportMessages(messages: readonly ImportedSysExMessage[]) {
+  return classifyImportedSysExMessages(messages, {
+    knownAddressKeys: new Set([...PARAMETERS_BY_ADDRESS.keys(), addressKey(PATCH_NAME_ADDRESS)]),
+    mappedParameterCount: PARAMETERS.length,
+  });
 }
 
 async function backupUser733(context: McpContext) {
@@ -876,6 +1319,61 @@ function requireParameter(id: string) {
   return param;
 }
 
+function requirePhysicalControl(id: string) {
+  const control = PHYSICAL_CONTROLS.find((candidate) => candidate.id === id);
+  if (!control) {
+    throw new Error(`Unknown physical control id: ${id}`);
+  }
+
+  return control;
+}
+
+function requireStringNumber(args: JsonObject) {
+  const value = requiredInteger(args, "string");
+  if (!STRING_NUMBERS.includes(value as (typeof STRING_NUMBERS)[number])) {
+    throw new Error("string must be an integer from 1 through 6.");
+  }
+
+  return value;
+}
+
+function requireAssignNumber(args: JsonObject) {
+  const value = requiredInteger(args, "assign");
+  if (value < 1 || value > 8) {
+    throw new Error("assign must be an integer from 1 through 8.");
+  }
+
+  return value;
+}
+
+function optionalStringSource(args: JsonObject): StringSourceSelection {
+  const value = optionalString(args, "source") ?? "all";
+  if (value === "all" || STRING_SOURCE_IDS.includes(value as StringSourceId)) {
+    return value as StringSourceSelection;
+  }
+
+  throw new Error(`Unsupported string source: ${value}`);
+}
+
+function optionalWriteMode(args: JsonObject) {
+  return optionalString(args, "mode") ?? "staged";
+}
+
+function assignTodo() {
+  return (
+    UNMAPPED_PARAMETER_TODOS.find((todo) => todo.id === "assignTargets") ?? {
+      id: "assignTargets",
+      section: "assigns",
+      displayName: "Assign target/source byte map",
+      reason: "Assign target/source mappings are not present in the verified temporary-patch registry.",
+    }
+  );
+}
+
+function assignUnavailableReason() {
+  return `Assign target/source mappings are unmapped. ${assignTodo().reason}`;
+}
+
 function normalizeParameterValue(param: ParameterDefinition, value: number) {
   return decodeParameterValue(param, encodeParameterValue(param, value));
 }
@@ -886,6 +1384,67 @@ function parameterWriteMessage(context: McpContext, param: ParameterDefinition, 
 
 function parameterWriteLabel(param: ParameterDefinition, value: number) {
   return `${param.moduleId.toUpperCase()} ${param.label}: ${String(value)}`;
+}
+
+function stringSourceMetadata() {
+  return STRING_SOURCE_IDS.map((id) => ({
+    id,
+    label: STRING_SOURCE_LABELS[id],
+  }));
+}
+
+function stringMatrixRows(values: Record<string, number>) {
+  return STRING_NUMBERS.map((stringNumber) => ({
+    string: stringNumber,
+    values: Object.fromEntries(
+      STRING_SOURCE_IDS.map((source) => {
+        const param = stringLevelParameter(stringNumber, source);
+        return [source, values[param.id] ?? param.defaultValue];
+      }),
+    ),
+    controls: STRING_SOURCE_IDS.map((source) => {
+      const param = stringLevelParameter(stringNumber, source);
+      return {
+        source,
+        value: values[param.id] ?? param.defaultValue,
+        parameter: parameterMetadata(param),
+      };
+    }),
+  }));
+}
+
+function stringLevelParameters(stringNumber: number, source: StringSourceSelection) {
+  if (source === "all") {
+    return STRING_SOURCE_IDS.map((sourceId) => stringLevelParameter(stringNumber, sourceId));
+  }
+
+  return [stringLevelParameter(stringNumber, source)];
+}
+
+function stringLevelParameter(stringNumber: number, source: StringSourceId) {
+  return requireParameter(`${source}String${stringNumber}Level`);
+}
+
+function parameterChangeMetadata({ param, value }: { param: ParameterDefinition; value: number }) {
+  const stringInfo = stringInfoFromParameterId(param.id);
+  return {
+    id: param.id,
+    value,
+    ...(stringInfo ?? {}),
+    parameter: parameterMetadata(param),
+  };
+}
+
+function stringInfoFromParameterId(id: string) {
+  const match = /^(pcm1|pcm2|modeling)String([1-6])Level$/.exec(id);
+  if (!match) {
+    return undefined;
+  }
+
+  return {
+    source: match[1] as StringSourceId,
+    string: Number(match[2]),
+  };
 }
 
 function parameterMetadata(param: ParameterDefinition) {
@@ -971,6 +1530,19 @@ function optionalString(args: JsonObject, key: string) {
   return value;
 }
 
+function optionalNumber(args: JsonObject, key: string) {
+  const value = args[key];
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${key} must be a finite number.`);
+  }
+
+  return value;
+}
+
 function requiredNumber(args: JsonObject, key: string) {
   const value = args[key];
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -1003,6 +1575,24 @@ function cloneValues(values: Record<string, number>) {
 
 function cloneSchema(schema: JsonSchema): JsonSchema {
   return JSON.parse(JSON.stringify(schema)) as JsonSchema;
+}
+
+function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs = MCP_TOOL_TIMEOUT_MS) {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+  });
+
+  return Promise.race([
+    promise.finally(() => {
+      if (timeout !== undefined) {
+        clearTimeout(timeout);
+      }
+    }),
+    timeoutPromise,
+  ]);
 }
 
 function bytesToBase64(bytes: readonly number[]) {

@@ -1,12 +1,27 @@
-import { ArrowCounterClockwise, CopySimple, SpeakerSlash } from "@phosphor-icons/react";
-import { PARAMETERS_BY_ID, type ParameterDefinition } from "../../data/gr55Parameters";
+import { ArrowCounterClockwise, CopySimple, SpeakerHigh, SpeakerSlash } from "@phosphor-icons/react";
+import { type CSSProperties } from "react";
+import { type ParameterDefinition } from "../../data/gr55Parameters";
+import {
+  buildStringMatrixModel,
+  cellForString,
+  copyStringRowToAll,
+  muteStringRow,
+  normalizeAllStringLevels,
+  restoreStringRow,
+  scaleStringLevelsByPercent,
+  soloStringRow,
+  STRING_NUMBERS,
+  type StringMatrixActionResult,
+  type StringMatrixCell as StringMatrixCellModel,
+} from "../../lib/actions/stringMatrix";
+import { toHex } from "../../lib/roland";
 
 type ParameterValues = Record<string, number>;
 
-const STRING_LEVEL_IDS = {
-  pcm1: (stringNumber: number) => `pcm1String${stringNumber}Level`,
-  pcm2: (stringNumber: number) => `pcm2String${stringNumber}Level`,
-  modeling: (stringNumber: number) => `modelingString${stringNumber}Level`,
+const STRING_MATRIX_MODEL = buildStringMatrixModel();
+const MATRIX_GRID_STYLE: CSSProperties = {
+  gridTemplateColumns: `70px repeat(${STRING_MATRIX_MODEL.columns.length}, minmax(150px, 1fr)) 160px`,
+  width: `${Math.max(680, 230 + STRING_MATRIX_MODEL.columns.length * 150)}px`,
 };
 
 export function StringMatrix({
@@ -18,39 +33,16 @@ export function StringMatrix({
   originalValues: ParameterValues;
   onChange: (param: ParameterDefinition, value: number, shouldSend?: boolean) => void;
 }) {
-  const paramsForRow = (stringNumber: number) =>
-    [
-      PARAMETERS_BY_ID.get(STRING_LEVEL_IDS.pcm1(stringNumber)),
-      PARAMETERS_BY_ID.get(STRING_LEVEL_IDS.pcm2(stringNumber)),
-      PARAMETERS_BY_ID.get(STRING_LEVEL_IDS.modeling(stringNumber)),
-    ].filter((param): param is ParameterDefinition => Boolean(param));
-
-  const setRow = (stringNumber: number, value: number) => {
-    paramsForRow(stringNumber).forEach((param) => onChange(param, value));
-  };
-
-  const resetRow = (stringNumber: number) => {
-    paramsForRow(stringNumber).forEach((param) => onChange(param, originalValues[param.id] ?? param.defaultValue));
-  };
-
-  const copyRowToAll = (stringNumber: number) => {
-    const row = paramsForRow(stringNumber);
-    for (let targetString = 1; targetString <= 6; targetString += 1) {
-      const target = paramsForRow(targetString);
-      target.forEach((param, index) => onChange(param, values[row[index]?.id ?? ""] ?? row[index]?.defaultValue ?? param.defaultValue));
+  const applyAction = (result: StringMatrixActionResult) => {
+    if (!result.safe) {
+      return;
     }
+
+    result.changes.forEach((change) => onChange(change.param, change.value));
   };
 
-  const normalizeLevels = () => {
-    for (let stringNumber = 1; stringNumber <= 6; stringNumber += 1) {
-      paramsForRow(stringNumber).forEach((param) => onChange(param, 100));
-    }
-  };
-
-  const restoreOriginal = () => {
-    for (let stringNumber = 1; stringNumber <= 6; stringNumber += 1) {
-      resetRow(stringNumber);
-    }
+  const restoreAllRows = () => {
+    STRING_NUMBERS.forEach((stringNumber) => applyAction(restoreStringRow(STRING_MATRIX_MODEL, stringNumber, originalValues)));
   };
 
   return (
@@ -62,39 +54,56 @@ export function StringMatrix({
           <p>Per-string level controls use only mapped temporary-patch registry parameters.</p>
         </div>
         <div className="matrix-batch-actions">
-          <button type="button" onClick={normalizeLevels}>Normalize levels</button>
-          <button type="button" onClick={restoreOriginal}>Restore original</button>
+          <button type="button" onClick={() => applyAction(normalizeAllStringLevels(STRING_MATRIX_MODEL))}>Normalize all</button>
+          <button type="button" onClick={() => applyAction(scaleStringLevelsByPercent(STRING_MATRIX_MODEL, values, 80))}>Scale 80%</button>
+          <button type="button" onClick={() => applyAction(scaleStringLevelsByPercent(STRING_MATRIX_MODEL, values, 120))}>Scale 120%</button>
+          <button type="button" onClick={restoreAllRows}>Restore all</button>
         </div>
       </div>
 
       <div className="string-matrix" role="table" aria-label="String level matrix">
-        <div className="string-matrix-row string-matrix-head" role="row">
+        <div className="string-matrix-row string-matrix-head" role="row" style={MATRIX_GRID_STYLE}>
           <span role="columnheader">String</span>
-          <span role="columnheader">PCM1 Level</span>
-          <span role="columnheader">PCM2 Level</span>
-          <span role="columnheader">Modeling Level</span>
+          {STRING_MATRIX_MODEL.columns.map((column) => (
+            <span key={column.key} role="columnheader" data-column-key={column.key} data-column-role={column.role}>
+              {column.label}
+            </span>
+          ))}
           <span role="columnheader">Row actions</span>
         </div>
-        {Array.from({ length: 6 }, (_, index) => index + 1).map((stringNumber) => (
-          <div className="string-matrix-row" role="row" key={stringNumber}>
+        {STRING_NUMBERS.map((stringNumber) => (
+          <div className="string-matrix-row" role="row" key={stringNumber} data-string-number={stringNumber} style={MATRIX_GRID_STYLE}>
             <strong role="rowheader">{stringNumber}</strong>
-            {paramsForRow(stringNumber).map((param) => (
-              <StringCell
-                key={param.id}
-                param={param}
-                value={values[param.id] ?? param.defaultValue}
-                originalValue={originalValues[param.id] ?? param.defaultValue}
-                onChange={(value) => onChange(param, value)}
-              />
-            ))}
+            {STRING_MATRIX_MODEL.columns.map((column) => {
+              const cell = cellForString(column, stringNumber);
+              return cell ? (
+                <StringCell
+                  key={column.key}
+                  cell={cell}
+                  columnKey={column.key}
+                  value={cell.param ? values[cell.param.id] ?? cell.param.defaultValue : undefined}
+                  originalValue={cell.param ? originalValues[cell.param.id] ?? cell.param.defaultValue : undefined}
+                  onChange={(param, value) => onChange(param, value)}
+                />
+              ) : null;
+            })}
             <div className="string-row-actions">
-              <button type="button" onClick={() => setRow(stringNumber, 0)} title={`Mute string ${stringNumber}`} aria-label={`Mute string ${stringNumber}`}>
+              <button type="button" onClick={() => applyAction(muteStringRow(STRING_MATRIX_MODEL, stringNumber))} title={`Mute string ${stringNumber}`} aria-label={`Mute string ${stringNumber}`}>
                 <SpeakerSlash size={15} aria-hidden="true" />
               </button>
-              <button type="button" onClick={() => copyRowToAll(stringNumber)} title={`Copy string ${stringNumber} to all`} aria-label={`Copy string ${stringNumber} to all`}>
+              <button
+                type="button"
+                onClick={() => applyAction(soloStringRow(STRING_MATRIX_MODEL, stringNumber))}
+                disabled={!STRING_MATRIX_MODEL.canSoloRows}
+                title={STRING_MATRIX_MODEL.canSoloRows ? `Solo string ${stringNumber}` : "Solo requires all mapped level params"}
+                aria-label={`Solo string ${stringNumber}`}
+              >
+                <SpeakerHigh size={15} aria-hidden="true" />
+              </button>
+              <button type="button" onClick={() => applyAction(copyStringRowToAll(STRING_MATRIX_MODEL, stringNumber, values))} title={`Copy string ${stringNumber} to all`} aria-label={`Copy string ${stringNumber} to all`}>
                 <CopySimple size={15} aria-hidden="true" />
               </button>
-              <button type="button" onClick={() => resetRow(stringNumber)} title={`Reset string ${stringNumber}`} aria-label={`Reset string ${stringNumber}`}>
+              <button type="button" onClick={() => applyAction(restoreStringRow(STRING_MATRIX_MODEL, stringNumber, originalValues))} title={`Restore string ${stringNumber}`} aria-label={`Restore string ${stringNumber}`}>
                 <ArrowCounterClockwise size={15} aria-hidden="true" />
               </button>
             </div>
@@ -105,9 +114,9 @@ export function StringMatrix({
       <details className="mapping-needed">
         <summary>Developer mapping needed</summary>
         <ul>
-          <li>Per-string PCM tuning/pitch fields are not in the verified registry.</li>
-          <li>Per-string modeling pitch/fine fields are not in the verified registry.</li>
-          <li>Per-string source enable/routing fields are not in the verified registry.</li>
+          {STRING_MATRIX_MODEL.mappingNeeded.map((item) => (
+            <li key={item.key}>{item.label}: {item.reason}</li>
+          ))}
         </ul>
       </details>
     </section>
@@ -115,29 +124,62 @@ export function StringMatrix({
 }
 
 function StringCell({
-  param,
+  cell,
+  columnKey,
   value,
   originalValue,
   onChange,
 }: {
-  param: ParameterDefinition;
-  value: number;
-  originalValue: number;
-  onChange: (value: number) => void;
+  cell: StringMatrixCellModel;
+  columnKey: string;
+  value?: number;
+  originalValue?: number;
+  onChange: (param: ParameterDefinition, value: number) => void;
 }) {
-  const dirty = value !== originalValue;
+  if (!cell.param) {
+    return (
+      <div
+        className="string-cell string-cell-missing"
+        data-string-matrix-cell="mapping-needed"
+        data-column-key={columnKey}
+        data-string-number={cell.stringNumber}
+        data-expected-param-id={cell.expectedParamId}
+        title={`Mapping needed for ${cell.expectedParamId}`}
+      >
+        <span>Mapping needed</span>
+      </div>
+    );
+  }
+
+  const param = cell.param;
+  const currentValue = value ?? param.defaultValue;
+  const baselineValue = originalValue ?? param.defaultValue;
+  const dirty = currentValue !== baselineValue;
+  const address = toHex(param.address);
+  const title = `${param.displayName}; Address ${address}; Hardware ${param.hardwareVerificationStatus}; ${dirty ? "Dirty" : "Clean"}`;
+
   return (
-    <label className={`string-cell ${dirty ? "is-dirty" : ""}`}>
+    <label
+      className={`string-cell ${dirty ? "is-dirty" : ""}`}
+      title={title}
+      data-string-matrix-cell="mapped"
+      data-column-key={columnKey}
+      data-string-number={cell.stringNumber}
+      data-param-id={param.id}
+      data-dirty={dirty ? "true" : "false"}
+      data-hardware-status={param.hardwareVerificationStatus}
+      data-address={address}
+    >
       <input
         type="range"
         min={param.min}
         max={param.max}
         step={param.step}
-        value={value}
+        value={currentValue}
         aria-label={param.displayName}
-        onChange={(event) => onChange(Number(event.target.value))}
+        onChange={(event) => onChange(param, Number(event.target.value))}
       />
-      <output>{value}{param.unit ?? ""}</output>
+      <output>{currentValue}{param.unit ?? ""}</output>
       {dirty ? <em>staged</em> : null}
     </label>
   );

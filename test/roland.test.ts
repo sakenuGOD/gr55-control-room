@@ -173,21 +173,53 @@ describe("GR-55 parameter encoding", () => {
     expect(PARAMETERS_BY_ID.get("pcm1Switch")).toMatchObject({
       moduleId: "pcm1",
       address: [0x18, 0x00, 0x20, 0x03],
-      hardwareVerificationStatus: "fixture-only",
+      hardwareVerificationStatus: "read-verified",
     });
     expect(PARAMETERS_BY_ID.get("pcm2Switch")).toMatchObject({
       moduleId: "pcm2",
       address: [0x18, 0x00, 0x21, 0x03],
-      hardwareVerificationStatus: "fixture-only",
+      hardwareVerificationStatus: "read-verified",
     });
     expect(PARAMETERS_BY_ID.get("modelingSwitch")).toMatchObject({
       moduleId: "modeling",
       address: [0x18, 0x00, 0x10, 0x0a],
-      hardwareVerificationStatus: "fixture-only",
+      hardwareVerificationStatus: "read-verified",
     });
     expect(PARAMETERS_BY_ID.get("normalPuSwitch")).toMatchObject({
       moduleId: "normal-pu",
       address: [0x18, 0x00, 0x02, 0x32],
+      hardwareVerificationStatus: "read-verified",
+    });
+  });
+
+  it("maps fixture-only CTL/EXP/GK and assign programmer bytes without claiming verification", () => {
+    expect(PARAMETERS_BY_ID.get("ctlFunction")).toMatchObject({
+      moduleId: "pedal",
+      address: [0x18, 0x00, 0x00, 0x12],
+      hardwareVerificationStatus: "read-verified",
+    });
+    expect(PARAMETERS_BY_ID.get("expSwitchFunction")).toMatchObject({
+      moduleId: "pedal",
+      address: [0x18, 0x00, 0x00, 0x4e],
+      hardwareVerificationStatus: "read-verified",
+    });
+    expect(PARAMETERS_BY_ID.get("gkS2Function")).toMatchObject({
+      moduleId: "pedal",
+      address: [0x18, 0x00, 0x00, 0x7f],
+      hardwareVerificationStatus: "read-verified",
+    });
+    expect(PARAMETERS_BY_ID.get("assign7TargetMax")).toMatchObject({
+      moduleId: "assigns",
+      address: [0x18, 0x00, 0x02, 0x05],
+      hardwareVerificationStatus: "read-verified",
+    });
+    expect(PARAMETERS_BY_ID.get("assign8Source")).toMatchObject({
+      moduleId: "assigns",
+      address: [0x18, 0x00, 0x02, 0x1b],
+      hardwareVerificationStatus: "read-verified",
+    });
+    expect(PARAMETERS_BY_ID.get("assign2Source")).toMatchObject({
+      moduleId: "assigns",
       hardwareVerificationStatus: "fixture-only",
     });
   });
@@ -220,6 +252,15 @@ describe("GR-55 parameter encoding", () => {
     expect(encodeParameterValue(pcm1Tone!, 897)).toEqual([0x56, 0x00, 0x00]);
     expect(decodeParameterValue(pcm1Tone!, [0x58, 0x00, 0x04])).toBe(5);
     expect(decodeParameterValue(pcm1Tone!, [0x56, 0x00, 0x0d])).toBe(910);
+  });
+
+  it("encodes assign target min/max with split 12-bit offset 1024 storage", () => {
+    const assign1TargetMin = PARAMETERS_BY_ID.get("assign1TargetMin");
+    expect(assign1TargetMin).toBeDefined();
+    expect(encodeParameterValue(assign1TargetMin!, -1024)).toEqual([0x00, 0x00, 0x00]);
+    expect(encodeParameterValue(assign1TargetMin!, 0)).toEqual([0x04, 0x00, 0x00]);
+    expect(encodeParameterValue(assign1TargetMin!, 1023)).toEqual([0x07, 0x0f, 0x0f]);
+    expect(decodeParameterValue(assign1TargetMin!, [0x04, 0x00, 0x00])).toBe(0);
   });
 });
 

@@ -16,6 +16,11 @@ export type SysExQueueClassification = {
   unknownMessages: number;
 };
 
+export type ImportedQueueSaveEligibility = {
+  canSave: boolean;
+  reason: string;
+};
+
 export type FileMeta = {
   name: string;
   size: number;
@@ -140,6 +145,36 @@ export function classifyImportedSysExMessages(
     detail: "Raw SysEx messages are queued. The app cannot claim this is a full patch or backup until the format is mapped and tested.",
     mappedMessages,
     unknownMessages: messages.length,
+  };
+}
+
+export function getImportedQueueNormalSaveEligibility(
+  classification: SysExQueueClassification,
+): ImportedQueueSaveEligibility {
+  if (classification.kind === "empty") {
+    return {
+      canSave: false,
+      reason: "No imported mapped parameters are queued.",
+    };
+  }
+
+  if (classification.unknownMessages > 0) {
+    return {
+      canSave: false,
+      reason: "Unknown or unmapped SysEx is send-to-temp only. It cannot use normal USER save/read-back.",
+    };
+  }
+
+  if (classification.kind === "mapped-patch" || classification.kind === "mapped-parameters") {
+    return {
+      canSave: true,
+      reason: "All queued messages map to known temporary-patch parameters and can use mapped save/read-back.",
+    };
+  }
+
+  return {
+    canSave: false,
+    reason: "This queue has no known mapped editor parameters and cannot be semantically read back.",
   };
 }
 

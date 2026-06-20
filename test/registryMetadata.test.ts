@@ -19,6 +19,13 @@ describe("GR-55 parameter registry metadata discipline", () => {
     ]);
   });
 
+  it("keeps read-verified and fixture-only distinct from write/read-back verified", () => {
+    expect(PARAMETERS_BY_ID.get("pcm2String6Level")?.hardwareVerificationStatus).toBe("read-verified");
+    expect(PARAMETERS_BY_ID.get("assign1Source")?.hardwareVerificationStatus).toBe("read-verified");
+    expect(PARAMETERS_BY_ID.get("ctlFunction")?.hardwareVerificationStatus).toBe("read-verified");
+    expect(PARAMETERS_BY_ID.get("assign2Source")?.hardwareVerificationStatus).toBe("fixture-only");
+  });
+
   it("requires source and grouping metadata for every mapped parameter", () => {
     const missing = PARAMETERS.filter((param) => !hasRegistryMetadata(param));
 
