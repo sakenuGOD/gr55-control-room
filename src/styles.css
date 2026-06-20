@@ -249,6 +249,14 @@ textarea {
   background: var(--surface-hover);
 }
 
+.librarian-actions button:hover {
+  background: var(--surface-hover);
+}
+
+.librarian-actions button.primary:hover {
+  background: var(--accent-blue-hover);
+}
+
 .toolbar-group button.is-active,
 .segmented-control button.is-active {
   color: var(--text);
@@ -766,7 +774,8 @@ input[type="number"] {
 .connection-readout,
 .monitor-readout,
 .library-current,
-.save-target {
+.save-target,
+.queue-classification {
   display: grid;
   gap: 2px;
   padding: 7px 0;
@@ -801,7 +810,8 @@ input[type="number"] {
 .connection-readout span,
 .monitor-readout span,
 .library-current span,
-.save-target span {
+.save-target span,
+.queue-classification span {
   color: var(--dim);
   font-size: 0.67rem;
   font-weight: 560;
@@ -810,11 +820,28 @@ input[type="number"] {
 .connection-readout strong,
 .monitor-readout strong,
 .library-current strong,
-.save-target strong {
+.save-target strong,
+.queue-classification strong {
   color: var(--text);
   font-size: 0.82rem;
   font-weight: 610;
   overflow-wrap: anywhere;
+}
+
+.queue-classification {
+  margin-bottom: 10px;
+  border-left: 3px solid var(--field-border);
+  padding-left: 8px;
+}
+
+.queue-classification.queue-mapped-patch,
+.queue-classification.queue-mapped-parameters {
+  border-left-color: var(--green);
+}
+
+.queue-classification.queue-unknown,
+.queue-classification.queue-roland-gr55 {
+  border-left-color: var(--warning);
 }
 
 .connection-readout small,
@@ -829,6 +856,41 @@ input[type="number"] {
   margin-top: 4px;
   color: var(--muted);
   font-size: 0.67rem;
+  overflow-wrap: anywhere;
+}
+
+.hardware-activity-list {
+  display: grid;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px solid var(--separator);
+}
+
+.hardware-activity-list div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 7px;
+  align-items: baseline;
+}
+
+.hardware-activity-list span,
+.hardware-activity-list p {
+  color: var(--dim);
+  font-size: 0.67rem;
+}
+
+.hardware-activity-list strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.75rem;
+  font-weight: 610;
+  overflow-wrap: anywhere;
+}
+
+.hardware-activity-list small {
+  grid-column: 2;
+  color: var(--dim);
+  font-size: 0.69rem;
   overflow-wrap: anywhere;
 }
 
@@ -1048,6 +1110,16 @@ input[type="number"] {
   background: rgb(255 179 64 / 0.05);
 }
 
+.library-current.is-unread {
+  border-left: 3px solid var(--warning);
+  padding-left: 8px;
+}
+
+.library-current.is-loaded {
+  border-left: 3px solid var(--green);
+  padding-left: 8px;
+}
+
 .library-current strong {
   display: flex;
   align-items: center;
@@ -1055,11 +1127,50 @@ input[type="number"] {
   gap: 8px;
 }
 
+.librarian-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.librarian-actions button {
+  min-height: 30px;
+  border: 1px solid var(--field-border);
+  border-radius: var(--radius-sm);
+  padding: 0 8px;
+  color: var(--text);
+  background: var(--surface);
+  font-size: 0.74rem;
+  font-weight: 560;
+}
+
+.librarian-actions button.primary {
+  color: #fff;
+  border-color: var(--accent-blue);
+  background: var(--accent-blue);
+}
+
+.librarian-actions button.danger {
+  color: #ffd8d5;
+}
+
 .empty-state,
 .system-note {
   color: var(--dim);
   font-size: 0.76rem;
   line-height: 1.42;
+}
+
+.mapping-note {
+  margin: 0 0 10px;
+  border: 1px solid rgb(255 179 64 / 0.28);
+  border-radius: var(--radius-sm);
+  padding: 8px 9px;
+  color: #ffe0ad;
+  background: rgb(255 179 64 / 0.08);
+  font-size: 0.76rem;
+  line-height: 1.38;
 }
 
 .patch-identity,
@@ -1247,6 +1358,7 @@ input[type="number"] {
   display: grid;
   align-content: center;
   gap: 2px;
+  overflow: hidden;
   padding: 8px;
   border-radius: 0;
   background: #38383c;
@@ -1265,15 +1377,7 @@ input[type="number"] {
 }
 
 .patch-effect-node i {
-  position: absolute;
-  right: -5px;
-  top: calc(50% - 4px);
-  z-index: 2;
-  width: 8px;
-  height: 8px;
-  border-top: 1px solid var(--separator-strong);
-  border-right: 1px solid var(--separator-strong);
-  transform: rotate(45deg);
+  display: none;
 }
 
 .signal-chain {
@@ -1321,11 +1425,11 @@ input[type="number"] {
   position: relative;
   min-width: 0;
   display: grid;
-  grid-template-columns: 40px minmax(150px, 1fr) minmax(90px, 0.55fr) minmax(160px, 1fr) 64px;
-  gap: 12px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  align-items: stretch;
   border-bottom: 1px solid var(--separator);
-  padding: 10px 0;
+  padding: 12px 0;
   background: transparent;
 }
 
@@ -1376,8 +1480,10 @@ input[type="number"] {
 }
 
 .source-role {
-  display: grid;
-  gap: 1px;
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  align-items: center;
 }
 
 .source-role span {
@@ -1390,6 +1496,12 @@ input[type="number"] {
 .source-role small {
   color: var(--dim);
   font-size: 0.68rem;
+}
+
+.source-param-stack {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
 }
 
 .source-edit-button {
@@ -1534,11 +1646,17 @@ input[type="number"] {
 }
 
 .module-tabs {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   min-height: 42px;
   display: flex;
   align-items: center;
   gap: 1px;
   overflow-x: auto;
+  overflow-y: hidden;
+  box-sizing: border-box;
+  contain: paint;
   padding: 6px 16px 7px;
   background: #353538;
 }
@@ -2802,6 +2920,14 @@ input[type="number"] {
   .patch-map-effects,
   .simple-editor-grid {
     grid-template-columns: 1fr;
+  }
+
+  .patch-map-effects {
+    overflow-x: hidden;
+  }
+
+  .patch-effect-node i {
+    display: none;
   }
 
   .intent-control-row {

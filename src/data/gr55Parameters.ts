@@ -1,7 +1,11 @@
 import { addressKey } from "../lib/midiMessages";
-import { clamp, encodeByte, encodeSplit12, encodeSplit8, makeDataSetMessage } from "../lib/roland";
+import { clamp, encodeByte, encodeSplit12, encodeSplit8, makeDataRequestMessage, makeDataSetMessage } from "../lib/roland";
 
 export type ParameterModuleId =
+  | "pcm1"
+  | "pcm2"
+  | "modeling"
+  | "normal-pu"
   | "common"
   | "mfx"
   | "chorus"
@@ -13,27 +17,101 @@ export type ParameterModuleId =
   | "noise";
 
 export type ParameterKind = "toggle" | "slider" | "select";
+export type ParameterSection =
+  | "pcm1"
+  | "pcm2"
+  | "modeling"
+  | "normal-pu"
+  | "amp"
+  | "mod"
+  | "mfx"
+  | "chorus"
+  | "delay"
+  | "reverb"
+  | "output"
+  | "eq"
+  | "assigns";
+export type ParameterValueType =
+  | "boolean"
+  | "enum"
+  | "number"
+  | "bipolar"
+  | "level"
+  | "dB"
+  | "ms"
+  | "percent"
+  | "toneNumber"
+  | "category";
+export type ParameterVerificationStatus = "verified" | "fixture-only" | "unmapped";
+export type ParameterEncoder =
+  | "boolean"
+  | "invertedBoolean"
+  | "byte"
+  | "c127"
+  | "c63"
+  | "c64"
+  | "offset24"
+  | "offset50"
+  | "offset64"
+  | "split8"
+  | "split12"
+  | "toneNumber3"
+  | "gain20"
+  | "reverbTime"
+  | "signedByteOffset3";
+
+export type ParameterMapping = {
+  scope: "temporary-patch";
+  address: readonly [number, number, number, number];
+  size: readonly [number, number, number, number];
+};
 
 export type ParameterDefinition = {
   id: string;
   moduleId: ParameterModuleId;
+  section: ParameterSection;
+  displayName: string;
   label: string;
   kind: ParameterKind;
+  type: ParameterValueType;
   address: readonly [number, number, number, number];
   min?: number;
   max?: number;
   step?: number;
   unit?: string;
   defaultValue: number;
+  default: number;
   options?: readonly string[];
-  encoder:
-    | "boolean"
-    | "byte"
-    | "split8"
-    | "split12"
-    | "gain20"
-    | "reverbTime"
-    | "signedByteOffset3";
+  allowedValues: readonly string[];
+  readMapping: ParameterMapping;
+  writeMapping: ParameterMapping;
+  parser: ParameterEncoder;
+  serializer: ParameterEncoder;
+  uiControl: ParameterKind;
+  hardwareVerificationStatus: ParameterVerificationStatus;
+  source?: string;
+  encoder: ParameterEncoder;
+};
+
+type RawParameterDefinition = Omit<
+  ParameterDefinition,
+  | "section"
+  | "displayName"
+  | "type"
+  | "default"
+  | "allowedValues"
+  | "readMapping"
+  | "writeMapping"
+  | "parser"
+  | "serializer"
+  | "uiControl"
+  | "hardwareVerificationStatus"
+> & {
+  section?: ParameterSection;
+  displayName?: string;
+  type?: ParameterValueType;
+  allowedValues?: readonly string[];
+  hardwareVerificationStatus?: ParameterVerificationStatus;
 };
 
 export type ModuleDefinition = {
@@ -44,16 +122,505 @@ export type ModuleDefinition = {
   parameters: ParameterDefinition[];
 };
 
+type RawModuleDefinition = Omit<ModuleDefinition, "parameters"> & {
+  parameters: RawParameterDefinition[];
+};
+
+export type ParameterReadMessage = {
+  param: ParameterDefinition;
+  label: string;
+  bytes: number[];
+};
+
 const A = {
   common: (offset: number) => [0x18, 0x00, (offset >> 8) & 0x7f, offset & 0x7f] as const,
   sends: (offset: number) => [0x18, 0x00, 0x06, offset] as const,
   ampMod: (offset: number) => [0x18, 0x00, 0x07, offset] as const,
   mfx: (offset: number) => [0x18, 0x00, 0x03, offset] as const,
+  pcm1: (offset: number) => [0x18, 0x00, 0x20, offset] as const,
+  pcm2: (offset: number) => [0x18, 0x00, 0x21, offset] as const,
+  pcm1Offset: (offset: number) => [0x18, 0x00, 0x30, offset] as const,
+  pcm2Offset: (offset: number) => [0x18, 0x00, 0x31, offset] as const,
+  modeling: (offset: number) => [0x18, 0x00, 0x10, offset] as const,
 };
 
 const boolOptions = ["OFF", "ON"] as const;
+const routingOptions = ["BYPS", "AMP", "MFX"] as const;
+const pcmFilterTypeOptions = ["OFF", "LPF", "BPF", "HPF", "PKG", "LPF2", "LPF3", "TONE"] as const;
+const modelingGuitarCategories = ["E.GTR", "AC", "E.BASS", "SYNTH"] as const;
+const modelingElectricGuitarTypes = ["CLA-ST", "MOD-ST", "H&H-ST", "TE", "LP", "P-90", "LIPS", "RICK", "335", "L4"] as const;
+const modelingAcousticTypes = ["STEEL", "NYLON", "SITAR", "BANJO", "RESO"] as const;
+const modelingBassTypes = ["JB", "PB"] as const;
+const modelingSynthTypes = ["ANALOG GR", "WAVE SYNTH", "FILTER BASS", "CRYSTAL", "ORGAN", "BRASS"] as const;
 
-export const MODULES: ModuleDefinition[] = [
+function makePcmModule(index: 1 | 2): RawModuleDefinition {
+  const id = `pcm${index}` as const;
+  const address = index === 1 ? A.pcm1 : A.pcm2;
+  const offsetAddress = index === 1 ? A.pcm1Offset : A.pcm2Offset;
+  const title = `PCM Tone ${index}`;
+  const shortTitle = `PCM${index}`;
+  const source = "RolandGR55AddressMap PatchPCMToneStruct";
+
+  return {
+    id,
+    title,
+    shortTitle,
+    tone: index === 1 ? "teal" : "indigo",
+    parameters: [
+      {
+        id: `${id}Switch`,
+        moduleId: id,
+        label: "Tone Switch",
+        kind: "toggle",
+        address: address(0x03),
+        options: boolOptions,
+        defaultValue: 1,
+        encoder: "invertedBoolean",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}ToneNumber`,
+        moduleId: id,
+        label: "PCM Tone Number",
+        kind: "slider",
+        address: address(0x00),
+        min: 1,
+        max: 910,
+        step: 1,
+        defaultValue: 1,
+        type: "toneNumber",
+        encoder: "toneNumber3",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}Level`,
+        moduleId: id,
+        label: "Part Level",
+        kind: "slider",
+        address: address(0x04),
+        min: 0,
+        max: 100,
+        step: 1,
+        unit: "%",
+        defaultValue: 80,
+        type: "level",
+        encoder: "c127",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}OctaveShift`,
+        moduleId: id,
+        label: "Octave Shift",
+        kind: "slider",
+        address: address(0x05),
+        min: -3,
+        max: 3,
+        step: 1,
+        unit: "oct",
+        defaultValue: 0,
+        type: "bipolar",
+        encoder: "offset64",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}Chromatic`,
+        moduleId: id,
+        label: "Chromatic",
+        kind: "toggle",
+        address: address(0x06),
+        options: boolOptions,
+        defaultValue: 0,
+        encoder: "boolean",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}NuanceSwitch`,
+        moduleId: id,
+        label: "Nuance Switch",
+        kind: "toggle",
+        address: address(0x08),
+        options: boolOptions,
+        defaultValue: 0,
+        encoder: "boolean",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}Pan`,
+        moduleId: id,
+        label: "Part Pan",
+        kind: "slider",
+        address: address(0x09),
+        min: -50,
+        max: 50,
+        step: 1,
+        defaultValue: 0,
+        type: "bipolar",
+        encoder: "c64",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}CoarseTune`,
+        moduleId: id,
+        label: "Coarse Tune",
+        kind: "slider",
+        address: address(0x0a),
+        min: -24,
+        max: 24,
+        step: 1,
+        unit: "st",
+        defaultValue: 0,
+        type: "bipolar",
+        encoder: "offset64",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}FineTune`,
+        moduleId: id,
+        label: "Fine Tune",
+        kind: "slider",
+        address: address(0x0b),
+        min: -50,
+        max: 50,
+        step: 1,
+        unit: "cent",
+        defaultValue: 0,
+        type: "bipolar",
+        encoder: "offset64",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}PortamentoSwitch`,
+        moduleId: id,
+        label: "Portamento Switch",
+        kind: "select",
+        address: address(0x0c),
+        options: ["OFF", "ON", "TONE"],
+        defaultValue: 0,
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}ReleaseMode`,
+        moduleId: id,
+        label: "Release Mode",
+        kind: "select",
+        address: address(0x0f),
+        options: ["1", "2"],
+        defaultValue: 0,
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      ...([1, 2, 3, 4, 5, 6] as const).map((stringNumber) => ({
+        id: `${id}String${stringNumber}Level`,
+        moduleId: id,
+        label: `String ${stringNumber} Level`,
+        kind: "slider" as const,
+        address: address(0x0f + stringNumber),
+        min: 0,
+        max: 100,
+        step: 1,
+        unit: "%",
+        defaultValue: 100,
+        type: "level" as const,
+        encoder: "c127" as const,
+        hardwareVerificationStatus: "fixture-only" as const,
+        source,
+      })),
+      {
+        id: `${id}OutputSelect`,
+        moduleId: id,
+        label: "Output Select",
+        kind: "select",
+        address: address(0x16),
+        options: routingOptions,
+        defaultValue: 1,
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source,
+      },
+      {
+        id: `${id}FilterType`,
+        moduleId: id,
+        label: "TVF Filter Type",
+        kind: "select",
+        address: offsetAddress(0x00),
+        options: pcmFilterTypeOptions,
+        defaultValue: 7,
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchPCMToneOffsetStruct",
+      },
+      {
+        id: `${id}CutoffOffset`,
+        moduleId: id,
+        label: "TVF Cutoff Offset",
+        kind: "slider",
+        address: offsetAddress(0x01),
+        min: -50,
+        max: 50,
+        step: 1,
+        defaultValue: 0,
+        type: "bipolar",
+        encoder: "c63",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchPCMToneOffsetStruct",
+      },
+      {
+        id: `${id}ResonanceOffset`,
+        moduleId: id,
+        label: "TVF Resonance Offset",
+        kind: "slider",
+        address: offsetAddress(0x02),
+        min: -50,
+        max: 50,
+        step: 1,
+        defaultValue: 0,
+        type: "bipolar",
+        encoder: "c64",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchPCMToneOffsetStruct",
+      },
+      {
+        id: `${id}AttackOffset`,
+        moduleId: id,
+        label: "TVA Attack Offset",
+        kind: "slider",
+        address: offsetAddress(0x10),
+        min: -50,
+        max: 50,
+        step: 1,
+        defaultValue: 0,
+        type: "bipolar",
+        encoder: "c64",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchPCMToneOffsetStruct",
+      },
+      {
+        id: `${id}ReleaseOffset`,
+        moduleId: id,
+        label: "TVA Release Offset",
+        kind: "slider",
+        address: offsetAddress(0x13),
+        min: -50,
+        max: 50,
+        step: 1,
+        defaultValue: 0,
+        type: "bipolar",
+        encoder: "c64",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchPCMToneOffsetStruct",
+      },
+    ],
+  };
+}
+
+const RAW_MODULES: RawModuleDefinition[] = [
+  makePcmModule(1),
+  makePcmModule(2),
+  {
+    id: "modeling",
+    title: "Modeling / COSM",
+    shortTitle: "MODEL",
+    tone: "orange",
+    parameters: [
+      {
+        id: "modelingCategory",
+        moduleId: "modeling",
+        label: "Guitar Mode Category",
+        kind: "select",
+        address: A.modeling(0x00),
+        options: modelingGuitarCategories,
+        defaultValue: 0,
+        type: "category",
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchModelingToneStruct",
+      },
+      {
+        id: "modelingElectricGuitarType",
+        moduleId: "modeling",
+        label: "E.GTR Model",
+        kind: "select",
+        address: A.modeling(0x01),
+        options: modelingElectricGuitarTypes,
+        defaultValue: 0,
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchModelingToneStruct",
+      },
+      {
+        id: "modelingAcousticType",
+        moduleId: "modeling",
+        label: "Acoustic Model",
+        kind: "select",
+        address: A.modeling(0x02),
+        options: modelingAcousticTypes,
+        defaultValue: 0,
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchModelingToneStruct",
+      },
+      {
+        id: "modelingBassType",
+        moduleId: "modeling",
+        label: "E.BASS Model",
+        kind: "select",
+        address: A.modeling(0x03),
+        options: modelingBassTypes,
+        defaultValue: 0,
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchModelingToneStruct",
+      },
+      {
+        id: "modelingSynthType",
+        moduleId: "modeling",
+        label: "Synth Model",
+        kind: "select",
+        address: A.modeling(0x04),
+        options: modelingSynthTypes,
+        defaultValue: 0,
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchModelingToneStruct",
+      },
+      {
+        id: "modelingLevel",
+        moduleId: "modeling",
+        label: "Level",
+        kind: "slider",
+        address: A.modeling(0x09),
+        min: 0,
+        max: 100,
+        step: 1,
+        unit: "%",
+        defaultValue: 80,
+        type: "level",
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchModelingToneStruct",
+      },
+      {
+        id: "modelingSwitch",
+        moduleId: "modeling",
+        label: "Tone Switch",
+        kind: "toggle",
+        address: A.modeling(0x0a),
+        options: boolOptions,
+        defaultValue: 1,
+        encoder: "invertedBoolean",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchModelingToneStruct",
+      },
+      ...([1, 2, 3, 4, 5, 6] as const).map((stringNumber) => ({
+        id: `modelingString${stringNumber}Level`,
+        moduleId: "modeling" as const,
+        label: `String ${stringNumber} Level`,
+        kind: "slider" as const,
+        address: A.modeling(0x0a + stringNumber),
+        min: 0,
+        max: 100,
+        step: 1,
+        unit: "%",
+        defaultValue: 100,
+        type: "level" as const,
+        encoder: "byte" as const,
+        hardwareVerificationStatus: "fixture-only" as const,
+        source: "RolandGR55AddressMap PatchModelingToneStruct",
+      })),
+      {
+        id: "modelingPitchShift",
+        moduleId: "modeling",
+        label: "Pitch Shift",
+        kind: "slider",
+        address: A.modeling(0x11),
+        min: -24,
+        max: 24,
+        step: 1,
+        unit: "st",
+        defaultValue: 0,
+        type: "bipolar",
+        encoder: "offset24",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchModelingToneStruct",
+      },
+      {
+        id: "modelingFineShift",
+        moduleId: "modeling",
+        label: "Fine Shift",
+        kind: "slider",
+        address: A.modeling(0x12),
+        min: -50,
+        max: 50,
+        step: 1,
+        unit: "cent",
+        defaultValue: 0,
+        type: "bipolar",
+        encoder: "offset50",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap PatchModelingToneStruct",
+      },
+    ],
+  },
+  {
+    id: "normal-pu",
+    title: "Normal Pickup",
+    shortTitle: "NPU",
+    tone: "brown",
+    parameters: [
+      {
+        id: "normalPuRouting",
+        moduleId: "normal-pu",
+        label: "Line Select",
+        kind: "select",
+        address: A.common(0x022e),
+        options: routingOptions,
+        defaultValue: 1,
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap common.lineSelectNormalPU",
+      },
+      {
+        id: "normalPuSwitch",
+        moduleId: "normal-pu",
+        label: "Pickup Switch",
+        kind: "toggle",
+        address: A.common(0x0232),
+        options: boolOptions,
+        defaultValue: 1,
+        encoder: "invertedBoolean",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap common.normalPuMute",
+      },
+      {
+        id: "normalPuLevel",
+        moduleId: "normal-pu",
+        label: "Pickup Level",
+        kind: "slider",
+        address: A.common(0x0233),
+        min: 0,
+        max: 100,
+        step: 1,
+        unit: "%",
+        defaultValue: 80,
+        type: "level",
+        encoder: "byte",
+        hardwareVerificationStatus: "fixture-only",
+        source: "RolandGR55AddressMap common.normalPuLevel",
+      },
+    ],
+  },
   {
     id: "common",
     title: "Patch Core",
@@ -721,8 +1288,28 @@ export const MODULES: ModuleDefinition[] = [
   },
 ];
 
+export const MODULES: ModuleDefinition[] = RAW_MODULES.map((module) => ({
+  ...module,
+  parameters: module.parameters.map((param) => enrichParameter(module, param)),
+}));
+
 export const PARAMETERS = MODULES.flatMap((module) => module.parameters);
 export const PARAMETERS_BY_ADDRESS = new Map(PARAMETERS.map((param) => [addressKey(param.address), param]));
+export const PARAMETERS_BY_ID = new Map(PARAMETERS.map((param) => [param.id, param]));
+export const UNMAPPED_PARAMETER_TODOS = [
+  {
+    id: "pcm1PortamentoTime",
+    section: "pcm1",
+    displayName: "PCM Tone 1 Portamento Time",
+    reason: "Secondary address 18:00:20:0D did not respond to USER 73-3 single RQ1 hardware verification.",
+  },
+  {
+    id: "pcm2PortamentoTime",
+    section: "pcm2",
+    displayName: "PCM Tone 2 Portamento Time",
+    reason: "Secondary address 18:00:21:0D did not respond to USER 73-3 single RQ1 hardware verification.",
+  },
+] as const;
 
 export function createInitialParameterValues() {
   return Object.fromEntries(PARAMETERS.map((param) => [param.id, param.defaultValue]));
@@ -736,8 +1323,24 @@ export function encodeParameterValue(param: ParameterDefinition, value: number) 
   switch (param.encoder) {
     case "boolean":
       return encodeByte(value > 0 ? 1 : 0, 0, 1);
+    case "invertedBoolean":
+      return encodeByte(value > 0 ? 0 : 1, 0, 1);
     case "byte":
       return encodeByte(value, param.min ?? 0, param.max ?? 127);
+    case "c127":
+      return encodeByte(Math.round((127 * clamp(value, 0, 100)) / 100), 0, 127);
+    case "c63":
+      return encodeByte(Math.round(1 + (126 * (50 + clamp(value, -50, 50))) / 100), 1, 127);
+    case "c64":
+      return encodeByte(Math.round((127 * (50 + clamp(value, -50, 50))) / 100), 0, 127);
+    case "offset24":
+      return encodeByte(value, param.min ?? -24, param.max ?? 24, 24);
+    case "offset50":
+      return encodeByte(value, param.min ?? -50, param.max ?? 50, 50);
+    case "offset64":
+      return encodeByte(value, param.min ?? -64, param.max ?? 63, 64);
+    case "toneNumber3":
+      return encodePcmToneNumber(value);
     case "gain20":
       return encodeByte(value, -20, 20, 20);
     case "reverbTime":
@@ -761,10 +1364,26 @@ export function decodeParameterValue(param: ParameterDefinition, bytes: readonly
   switch (param.encoder) {
     case "boolean":
       return bytes[0] ? 1 : 0;
+    case "invertedBoolean":
+      return bytes[0] ? 0 : 1;
+    case "c127":
+      return clamp(Math.round((100 * (bytes[0] ?? 0)) / 127), 0, 100);
+    case "c63":
+      return clamp(Math.round((100 * ((bytes[0] ?? 64) - 1)) / 126 - 50), -50, 50);
+    case "c64":
+      return clamp(Math.round((100 * (bytes[0] ?? 64)) / 127 - 50), -50, 50);
+    case "offset24":
+      return clamp((bytes[0] ?? 24) - 24, param.min ?? -24, param.max ?? 24);
+    case "offset50":
+      return clamp((bytes[0] ?? 50) - 50, param.min ?? -50, param.max ?? 50);
+    case "offset64":
+      return clamp((bytes[0] ?? 64) - 64, param.min ?? -64, param.max ?? 63);
+    case "toneNumber3":
+      return decodePcmToneNumber(bytes);
     case "gain20":
       return clamp((bytes[0] ?? 20) - 20, -20, 20);
     case "reverbTime":
-      return clamp(((bytes[0] ?? 23) + 1) * 0.1, 0.1, 10);
+      return Number(clamp(((bytes[0] ?? 23) + 1) * 0.1, 0.1, 10).toFixed(1));
     case "signedByteOffset3":
       return clamp((bytes[0] ?? 3) - 3, -3, 3);
     case "split8":
@@ -789,18 +1408,130 @@ export function makeParameterMessage(
   return makeDataSetMessage(param.address, encodeParameterValue(param, value), deviceId);
 }
 
+export function makeParameterReadMessage(param: ParameterDefinition, deviceId: number) {
+  return makeDataRequestMessage(param.address, parameterDataSize(param), deviceId);
+}
+
+export function makeMappedPatchReadMessages(deviceId: number, parameters: readonly ParameterDefinition[] = PARAMETERS): ParameterReadMessage[] {
+  return parameters.map((param) => ({
+    param,
+    label: `Read ${param.label}`,
+    bytes: makeParameterReadMessage(param, deviceId),
+  }));
+}
+
 export function parameterDataSize(param: ParameterDefinition) {
   switch (param.encoder) {
     case "split8":
       return [0x00, 0x00, 0x00, 0x02];
     case "split12":
+    case "toneNumber3":
       return [0x00, 0x00, 0x00, 0x03];
     case "boolean":
+    case "invertedBoolean":
     case "byte":
+    case "c127":
+    case "c63":
+    case "c64":
+    case "offset24":
+    case "offset50":
+    case "offset64":
     case "gain20":
     case "reverbTime":
     case "signedByteOffset3":
     default:
       return [0x00, 0x00, 0x00, 0x01];
   }
+}
+
+function enrichParameter(module: RawModuleDefinition, param: RawParameterDefinition): ParameterDefinition {
+  const type = param.type ?? inferParameterType(param);
+  const size = parameterDataSizeForEncoder(param.encoder);
+
+  return {
+    ...param,
+    section: param.section ?? sectionForModuleId(param.moduleId),
+    displayName: param.displayName ?? param.label,
+    type,
+    default: param.defaultValue,
+    allowedValues: param.allowedValues ?? param.options ?? [],
+    readMapping: {
+      scope: "temporary-patch",
+      address: param.address,
+      size,
+    },
+    writeMapping: {
+      scope: "temporary-patch",
+      address: param.address,
+      size,
+    },
+    parser: param.encoder,
+    serializer: param.encoder,
+    uiControl: param.kind,
+    hardwareVerificationStatus: param.hardwareVerificationStatus ?? "verified",
+  };
+}
+
+function inferParameterType(param: RawParameterDefinition): ParameterValueType {
+  if (param.kind === "toggle" || param.encoder === "boolean" || param.encoder === "invertedBoolean") {
+    return "boolean";
+  }
+  if (param.kind === "select" || param.options?.length) {
+    return "enum";
+  }
+  if (param.encoder === "toneNumber3") {
+    return "toneNumber";
+  }
+  if (param.unit === "dB") {
+    return "dB";
+  }
+  if (param.unit === "ms") {
+    return "ms";
+  }
+  if (param.unit === "%" || param.label.toLowerCase().includes("level")) {
+    return "level";
+  }
+  if (["c63", "c64", "offset24", "offset50", "offset64", "gain20", "signedByteOffset3"].includes(param.encoder)) {
+    return "bipolar";
+  }
+  return "number";
+}
+
+function sectionForModuleId(moduleId: ParameterModuleId): ParameterSection {
+  if (moduleId === "common" || moduleId === "noise") {
+    return "output";
+  }
+  return moduleId;
+}
+
+function parameterDataSizeForEncoder(encoder: ParameterEncoder) {
+  switch (encoder) {
+    case "split8":
+      return [0x00, 0x00, 0x00, 0x02] as const;
+    case "split12":
+    case "toneNumber3":
+      return [0x00, 0x00, 0x00, 0x03] as const;
+    default:
+      return [0x00, 0x00, 0x00, 0x01] as const;
+  }
+}
+
+function encodePcmToneNumber(value: number) {
+  const safe = clamp(Math.round(value), 1, 910);
+  if (safe >= 897) {
+    const index = safe - 897;
+    return [0x56, (index >> 7) & 0x7f, index & 0x7f];
+  }
+
+  const index = safe - 1;
+  return [0x58, (index >> 7) & 0x7f, index & 0x7f];
+}
+
+function decodePcmToneNumber(bytes: readonly number[]) {
+  const bankMsb = bytes[0] ?? 0x58;
+  const index = (((bytes[1] ?? 0) & 0x7f) << 7) | ((bytes[2] ?? 0) & 0x7f);
+  if (bankMsb === 0x56) {
+    return clamp(897 + index, 897, 910);
+  }
+  return clamp(1 + index, 1, 896);
 }

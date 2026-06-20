@@ -26,8 +26,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MODULES,
   PARAMETERS_BY_ADDRESS,
+  PARAMETERS_BY_ID,
   createInitialParameterValues,
   decodeParameterValue,
+  makeMappedPatchReadMessages,
   makeParameterMessage,
   parameterDataSize,
   type ModuleDefinition,
@@ -51,20 +53,50 @@ import {
   toHex,
 } from "./lib/roland";
 import {
+  PATCH_NAME_ADDRESS,
+  decodePatchName,
+  makePatchNameReadMessage,
+  makePatchNameWriteMessage,
+  validatePatchName,
+} from "./lib/patchName";
+import {
   makeDownloadBlobUrl,
   parseImportedSysEx,
   serializeMessagesAsHex,
   validateImportFileMeta,
+  classifyImportedSysExMessages,
   type ImportedSysExMessage,
+  type SysExQueueClassification,
 } from "./lib/sysexLibrary";
+import {
+  applyMappedReadResponse,
+  createIdleMappedReadProgress,
+  createMappedReadProgress,
+  markMappedReadPartial,
+  type MappedReadProgress,
+} from "./lib/readProgress";
+import { parseMappedPatchMessages } from "./lib/patchImport";
 import type { UsbPacketMode } from "./lib/usbMidi";
 
 type ParameterValues = Record<string, number>;
 type TransportMode = "bridge" | "midi" | "usb";
 type OperationState = "idle" | "sending" | "saved" | "error";
-type WorkflowState = "disconnected" | "ready-to-read" | "ready-to-edit" | "dirty";
+type WorkflowState = "disconnected" | "select-slot" | "ready-to-read" | "ready-to-edit" | "dirty";
+type PatchSlotState = "unread" | "reading" | "loaded" | "dirty" | "saved" | "error";
 type EditorTabId = "overview" | "tones" | "assigns" | "pedal" | "system" | "sysex" | ParameterModuleId;
-type SourceField = "enabled" | "level" | "pan" | "tone" | "muted" | "solo" | "attack" | "brightness" | "octave" | "fxSend";
+type SourceField =
+  | "enabled"
+  | "level"
+  | "pan"
+  | "tone"
+  | "routing"
+  | "octave"
+  | "coarseTune"
+  | "fineTune"
+  | "cutoff"
+  | "resonance"
+  | "attack"
+  | "release";
 type SourceIntent = "change-instrument" | "brighter" | "darker" | "softer-attack" | "sharper-attack" | "forward" | "back" | "more-space";
 type ModuleIntent = "more" | "less" | "longer" | "shorter" | "brighter" | "darker" | "movement" | "reset";
 type Selection =
@@ -83,10 +115,33 @@ type InteractionHud = {
   status: "live" | "pending" | "staged";
 };
 
+type HardwareActivity = {
+  id: string;
+  kind: "program" | "control" | "parameter" | "identity" | "system";
+  label: string;
+  detail: string;
+  at: string;
+};
+
 type ParameterHistoryItem = {
   paramId: string;
   before: number;
   after: number;
+};
+
+type PatchSlotRecord = {
+  status: PatchSlotState;
+  name?: string;
+  error?: string;
+};
+
+type SaveVerification = {
+  slotLabel: string;
+  expectedPatchName: string;
+  expectedValues: Record<string, number>;
+  pendingPatchName: boolean;
+  pendingParameterIds: string[];
+  mismatches: string[];
 };
 
 type PerformanceControlDefinition = {
@@ -101,18 +156,10 @@ type SourceDefinition = {
   id: string;
   label: string;
   block: string;
-  toneOptions: string[];
   role: "main" | "layer" | "texture" | "hidden";
-  enabled: boolean;
-  level: number;
-  pan: number;
-  tone: string;
-  attack: number;
-  brightness: number;
-  octave: number;
-  fxSend: number;
-  muted: boolean;
-  solo: boolean;
+  moduleId: ParameterModuleId;
+  primaryField: SourceField;
+  fields: Partial<Record<SourceField, string>>;
 };
 
 const PERFORMANCE_CONTROLS: PerformanceControlDefinition[] = [
@@ -123,76 +170,102 @@ const PERFORMANCE_CONTROLS: PerformanceControlDefinition[] = [
   { id: "ctl", label: "CTL pedal", controller: 80, kind: "toggle", defaultValue: 0 },
 ];
 
-const SOURCE_DEFAULTS: SourceDefinition[] = [
+const SOURCE_DEFINITIONS: SourceDefinition[] = [
   {
     id: "pcm1",
     label: "PCM Tone 1",
     block: "PCM1",
-    toneOptions: ["Nylon guitar", "Synth lead", "Warm pad", "Bell mallet"],
     role: "main",
-    enabled: true,
-    level: 82,
-    pan: 0,
-    tone: "Warm pad",
-    attack: 42,
-    brightness: 54,
-    octave: 0,
-    fxSend: 42,
-    muted: false,
-    solo: false,
+    moduleId: "pcm1",
+    primaryField: "level",
+    fields: {
+      enabled: "pcm1Switch",
+      tone: "pcm1ToneNumber",
+      level: "pcm1Level",
+      pan: "pcm1Pan",
+      octave: "pcm1OctaveShift",
+      coarseTune: "pcm1CoarseTune",
+      fineTune: "pcm1FineTune",
+      cutoff: "pcm1CutoffOffset",
+      resonance: "pcm1ResonanceOffset",
+      attack: "pcm1AttackOffset",
+      release: "pcm1ReleaseOffset",
+      routing: "pcm1OutputSelect",
+    },
   },
   {
     id: "pcm2",
     label: "PCM Tone 2",
     block: "PCM2",
-    toneOptions: ["JP strings", "Choir layer", "Square lead", "Analog brass"],
     role: "layer",
-    enabled: true,
-    level: 64,
-    pan: -8,
-    tone: "JP strings",
-    attack: 55,
-    brightness: 48,
-    octave: 1,
-    fxSend: 38,
-    muted: false,
-    solo: false,
+    moduleId: "pcm2",
+    primaryField: "level",
+    fields: {
+      enabled: "pcm2Switch",
+      tone: "pcm2ToneNumber",
+      level: "pcm2Level",
+      pan: "pcm2Pan",
+      octave: "pcm2OctaveShift",
+      coarseTune: "pcm2CoarseTune",
+      fineTune: "pcm2FineTune",
+      cutoff: "pcm2CutoffOffset",
+      resonance: "pcm2ResonanceOffset",
+      attack: "pcm2AttackOffset",
+      release: "pcm2ReleaseOffset",
+      routing: "pcm2OutputSelect",
+    },
   },
   {
     id: "modeling",
     label: "Modeling tone",
     block: "Modeling",
-    toneOptions: ["E.GTR Strat", "LP humbucker", "Acoustic steel", "Bass model"],
     role: "main",
-    enabled: true,
-    level: 88,
-    pan: 0,
-    tone: "E.GTR Strat",
-    attack: 28,
-    brightness: 62,
-    octave: 0,
-    fxSend: 18,
-    muted: false,
-    solo: false,
+    moduleId: "modeling",
+    primaryField: "level",
+    fields: {
+      enabled: "modelingSwitch",
+      tone: "modelingCategory",
+      level: "modelingLevel",
+      coarseTune: "modelingPitchShift",
+      fineTune: "modelingFineShift",
+    },
   },
   {
     id: "normal",
     label: "Normal pickup",
     block: "Normal PU",
-    toneOptions: ["Direct", "Through amp", "Blend clean", "Muted"],
     role: "hidden",
-    enabled: false,
-    level: 48,
-    pan: 0,
-    tone: "Direct",
-    attack: 20,
-    brightness: 50,
-    octave: 0,
-    fxSend: 12,
-    muted: false,
-    solo: false,
+    moduleId: "normal-pu",
+    primaryField: "level",
+    fields: {
+      enabled: "normalPuSwitch",
+      level: "normalPuLevel",
+      routing: "normalPuRouting",
+    },
   },
 ];
+
+const PCM_TONE_CATEGORIES = [
+  { name: "Ac.Piano", first: 1, last: 16 },
+  { name: "Pop Piano", first: 17, last: 19 },
+  { name: "E.Grand Piano", first: 20, last: 21 },
+  { name: "E.Piano", first: 22, last: 59 },
+  { name: "Organ/Keys", first: 60, last: 162 },
+  { name: "Guitar", first: 163, last: 209 },
+  { name: "Bass", first: 210, last: 314 },
+  { name: "Plucked/Strings", first: 315, last: 363 },
+  { name: "Orchestral/Brass/Wind", first: 364, last: 415 },
+  { name: "Vox/Choir", first: 416, last: 445 },
+  { name: "Synth Lead", first: 446, last: 568 },
+  { name: "Synth Brass", first: 569, last: 608 },
+  { name: "Synth Pad/Strings", first: 609, last: 692 },
+  { name: "Synth Bellpad/PolyKey", first: 693, last: 754 },
+  { name: "Synth FX/Seq", first: 755, last: 796 },
+  { name: "Pulsating/Beat", first: 797, last: 839 },
+  { name: "Hit/Sound FX", first: 840, last: 883 },
+  { name: "Percussion", first: 884, last: 896 },
+  { name: "Drums", first: 897, last: 910 },
+] as const;
 
 const CLEAR_TEMP_PARAMETER_VALUES: Record<string, number> = {
   patchLevel: 0,
@@ -211,6 +284,10 @@ const CLEAR_TEMP_PARAMETER_VALUES: Record<string, number> = {
 const EDITOR_TABS: Array<{ id: EditorTabId; label: string; moduleId?: ParameterModuleId }> = [
   { id: "overview", label: "Overview" },
   { id: "tones", label: "Tones" },
+  { id: "pcm1", label: "PCM1", moduleId: "pcm1" },
+  { id: "pcm2", label: "PCM2", moduleId: "pcm2" },
+  { id: "modeling", label: "Modeling", moduleId: "modeling" },
+  { id: "normal-pu", label: "Normal PU", moduleId: "normal-pu" },
   { id: "common", label: "Patch", moduleId: "common" },
   { id: "amp", label: "Amp", moduleId: "amp" },
   { id: "mod", label: "MOD", moduleId: "mod" },
@@ -235,11 +312,31 @@ const EFFECT_FLOW: Array<{ moduleId: ParameterModuleId; label: string; role: str
   { moduleId: "reverb", label: "Reverb", role: "Space" },
   { moduleId: "eq", label: "Output", role: "Final tone" },
 ];
+const MAPPED_PARAMETER_ADDRESS_KEYS = new Set(PARAMETERS_BY_ADDRESS.keys());
+const PATCH_NAME_ADDRESS_KEY = addressKey(PATCH_NAME_ADDRESS);
+const KNOWN_IMPORT_ADDRESS_KEYS = new Set([...MAPPED_PARAMETER_ADDRESS_KEYS, PATCH_NAME_ADDRESS_KEY]);
+const MAPPED_PARAMETER_COUNT = PARAMETERS_BY_ADDRESS.size;
+const MAPPED_PARAMETER_KEYS = [...PARAMETERS_BY_ADDRESS.keys()];
+const PATCH_NAME_READ_DELAY_MS = 100;
+const MAPPED_READ_SEND_DELAY_MS = 110;
+const MODULE_READ_SEND_DELAY_MS = 110;
+const MAPPED_READ_RETRY_DELAY_MS = 800;
+const MAPPED_READ_TIMEOUT_MS = 20000;
+const SAVE_VERIFY_READ_DELAY_MS = 140;
+const PARAMETER_WRITE_SEND_DELAY_MS = 70;
+const PATCH_SELECT_SETTLE_MS = 420;
 
 export function App() {
   const initialValues = useMemo(() => createInitialParameterValues(), []);
   const [selectedPatch, setSelectedPatch] = useState<UserPatch>(USER_PATCHES[212] ?? USER_PATCHES[0]);
-  const [patchLoaded, setPatchLoaded] = useState(true);
+  const [slotSelectionConfirmed, setSlotSelectionConfirmed] = useState(false);
+  const [patchLoaded, setPatchLoaded] = useState(false);
+  const [readStatus, setReadStatus] = useState("Select a USER slot so the app can choose it on the GR-55, then read mapped parameters.");
+  const [patchName, setPatchName] = useState("");
+  const [originalPatchName, setOriginalPatchName] = useState("");
+  const [patchNameStatus, setPatchNameStatus] = useState<PatchSlotState>("unread");
+  const [patchNameError, setPatchNameError] = useState("");
+  const [patchSlots, setPatchSlots] = useState<Record<number, PatchSlotRecord>>({});
   const [incomingBankMsb, setIncomingBankMsb] = useState(0);
   const [activeModuleId, setActiveModuleId] = useState<ParameterModuleId>("mfx");
   const [activeTabId, setActiveTabId] = useState<EditorTabId>("mfx");
@@ -248,7 +345,6 @@ export function App() {
   const [performanceValues, setPerformanceValues] = useState<ParameterValues>(() =>
     Object.fromEntries(PERFORMANCE_CONTROLS.map((control) => [control.id, control.defaultValue])),
   );
-  const [sources, setSources] = useState<SourceDefinition[]>(() => SOURCE_DEFAULTS);
   const [midiChannel, setMidiChannel] = useState(1);
   const [deviceId, setDeviceId] = useState(0x10);
   const [liveWrite, setLiveWrite] = useState(true);
@@ -267,26 +363,113 @@ export function App() {
   const [compareActive, setCompareActive] = useState(false);
   const [utilityDrawerOpen, setUtilityDrawerOpen] = useState(false);
   const [previewedDirtyChanges, setPreviewedDirtyChanges] = useState(false);
+  const [mappedReadProgress, setMappedReadProgressState] = useState<MappedReadProgress>(() =>
+    createIdleMappedReadProgress(MAPPED_PARAMETER_COUNT),
+  );
+  const [saveVerification, setSaveVerification] = useState<SaveVerification | null>(null);
+  const [autoReadPatch, setAutoReadPatch] = useState<UserPatch | null>(null);
+  const [hardwareActivity, setHardwareActivity] = useState<HardwareActivity[]>([]);
   const patchSearchRef = useRef<HTMLInputElement | null>(null);
+  const incomingBankMsbRef = useRef(0);
+  const readTimeoutRef = useRef<number | null>(null);
+  const mappedReadProgressRef = useRef(mappedReadProgress);
+  const saveVerificationRef = useRef<SaveVerification | null>(null);
+  const bridgeAutoUsbAttemptRef = useRef(false);
+  const identityRequestKeyRef = useRef("");
+
+  const setMappedReadProgress = useCallback((next: MappedReadProgress) => {
+    mappedReadProgressRef.current = next;
+    setMappedReadProgressState(next);
+  }, []);
+
+  const clearReadTimeout = useCallback(() => {
+    if (readTimeoutRef.current !== null) {
+      window.clearTimeout(readTimeoutRef.current);
+      readTimeoutRef.current = null;
+    }
+  }, []);
+
+  const pushHardwareActivity = useCallback((activity: Omit<HardwareActivity, "id" | "at">) => {
+    setHardwareActivity((current) => [
+      {
+        ...activity,
+        id: crypto.randomUUID(),
+        at: new Date().toLocaleTimeString(),
+      },
+      ...current.slice(0, 7),
+    ]);
+  }, []);
+
+  const setSaveVerificationState = useCallback((next: SaveVerification | null) => {
+    saveVerificationRef.current = next;
+    setSaveVerification(next);
+  }, []);
+
+  const updateSelectedSlotRecord = useCallback((patch: UserPatch, patchRecord: PatchSlotRecord) => {
+    setPatchSlots((current) => ({
+      ...current,
+      [patch.userIndex]: {
+        ...current[patch.userIndex],
+        ...patchRecord,
+      },
+    }));
+  }, []);
+
+  const resetLoadedPatchState = useCallback(() => {
+    setPatchLoaded(false);
+    setPatchName("");
+    setOriginalPatchName("");
+    setPatchNameStatus("unread");
+    setPatchNameError("");
+    setSaveVerificationState(null);
+    setMappedReadProgress(createIdleMappedReadProgress(MAPPED_PARAMETER_COUNT));
+    setValues(createInitialParameterValues());
+    setOriginalValues(createInitialParameterValues());
+    setUndoStack([]);
+    setRedoStack([]);
+    setPreviewedDirtyChanges(false);
+    setCompareActive(false);
+  }, [setMappedReadProgress, setSaveVerificationState]);
 
   const handleIncoming = useCallback(
     (event: IncomingMidiEvent) => {
       if (event.type === "bank-select") {
+        incomingBankMsbRef.current = event.bankMsb;
         setIncomingBankMsb(event.bankMsb);
         setMirrorStatus(`GR-55 bank MSB ${event.bankMsb}`);
+        pushHardwareActivity({
+          kind: "program",
+          label: "Bank Select",
+          detail: `MSB ${event.bankMsb}`,
+        });
         return;
       }
 
       if (event.type === "program-change") {
         const patch = USER_PATCHES.find(
-          (candidate) => candidate.bankMsb === incomingBankMsb && candidate.program === event.program,
+          (candidate) => candidate.bankMsb === incomingBankMsbRef.current && candidate.program === event.program,
         );
 
         if (patch) {
           setSelectedPatch(patch);
+          setSlotSelectionConfirmed(true);
+          resetLoadedPatchState();
           setMirrorStatus(`GR-55 selected USER ${patch.label}`);
+          setReadStatus(`GR-55 switched to USER ${patch.label}. Auto-reading mapped parameters.`);
+          updateSelectedSlotRecord(patch, { status: "reading" });
+          setAutoReadPatch(patch);
+          pushHardwareActivity({
+            kind: "program",
+            label: `USER ${patch.label}`,
+            detail: `Incoming PC ${event.program}, bank ${incomingBankMsbRef.current}`,
+          });
         } else {
-          setMirrorStatus(`GR-55 PC ${event.program} on bank ${incomingBankMsb}`);
+          setMirrorStatus(`GR-55 PC ${event.program} on bank ${incomingBankMsbRef.current}`);
+          pushHardwareActivity({
+            kind: "program",
+            label: "Program Change",
+            detail: `PC ${event.program}, bank ${incomingBankMsbRef.current}`,
+          });
         }
         return;
       }
@@ -296,24 +479,164 @@ export function App() {
         if (control) {
           setPerformanceValues((current) => ({ ...current, [control.id]: event.value }));
           setMirrorStatus(`GR-55 CC ${event.controller} = ${event.value}`);
+          pushHardwareActivity({
+            kind: "control",
+            label: control.label,
+            detail: `CC ${event.controller} = ${event.value}`,
+          });
+        } else {
+          pushHardwareActivity({
+            kind: "control",
+            label: "Unmapped CC",
+            detail: `CC ${event.controller} = ${event.value}`,
+          });
         }
         return;
       }
 
       if (event.type === "roland-data") {
-        const param = PARAMETERS_BY_ADDRESS.get(addressKey(event.address));
+        const readAddressKey = addressKey(event.address);
+        const activeRead = mappedReadProgressRef.current.status === "reading" || mappedReadProgressRef.current.status === "partial";
+        if (!slotSelectionConfirmed && !activeRead && !saveVerificationRef.current) {
+          setMirrorStatus(event.checksumValid ? `Ignored unscoped GR-55 data ${toHex(event.address)}` : "GR-55 data checksum failed");
+          pushHardwareActivity({
+            kind: "parameter",
+            label: event.checksumValid ? "Ignored unscoped Roland data" : "Checksum failed",
+            detail: `${toHex(event.address)} ${toHex(event.valueBytes)}`,
+          });
+          return;
+        }
+
+        if (readAddressKey === PATCH_NAME_ADDRESS_KEY && event.checksumValid) {
+          const decodedName = decodePatchName(event.valueBytes);
+          setPatchName(decodedName);
+          setOriginalPatchName(decodedName);
+          setPatchNameStatus("loaded");
+          setPatchNameError("");
+          setDeviceId(event.deviceId);
+          setMirrorStatus(`GR-55 patch name = ${decodedName || "(blank)"}`);
+          updateSelectedSlotRecord(selectedPatch, { status: "loaded", name: decodedName });
+          pushHardwareActivity({
+            kind: "parameter",
+            label: "Patch name",
+            detail: `${toHex(event.address)} = ${decodedName || "(blank)"}`,
+          });
+
+          const verification = saveVerificationRef.current;
+          if (verification?.pendingPatchName) {
+            const mismatches =
+              decodedName === verification.expectedPatchName
+                ? verification.mismatches
+                : [...verification.mismatches, `Patch name expected "${verification.expectedPatchName}" but read "${decodedName}"`];
+            const nextVerification = {
+              ...verification,
+              pendingPatchName: false,
+              mismatches,
+            };
+            const complete = nextVerification.pendingParameterIds.length === 0;
+            if (complete && mismatches.length === 0) {
+              setSaveVerificationState(null);
+              setOriginalPatchName(nextVerification.expectedPatchName);
+              setOriginalValues((current) => ({ ...current, ...nextVerification.expectedValues }));
+              setPreviewedDirtyChanges(false);
+              setOperationState("saved");
+              window.setTimeout(() => setOperationState("idle"), 1700);
+              setReadStatus(`Save read-back verified for USER ${nextVerification.slotLabel}.`);
+              updateSelectedSlotRecord(selectedPatch, { status: "saved", name: nextVerification.expectedPatchName });
+            } else if (complete) {
+              setSaveVerificationState(null);
+              setOperationState("error");
+              window.setTimeout(() => setOperationState("idle"), 1700);
+              setReadStatus(`Save read-back mismatch for USER ${nextVerification.slotLabel}: ${mismatches.join("; ")}.`);
+              updateSelectedSlotRecord(selectedPatch, { status: "error", name: decodedName, error: mismatches.join("; ") });
+            } else {
+              setSaveVerificationState(nextVerification);
+              setReadStatus(`Save read-back verification pending for USER ${verification.slotLabel}: ${nextVerification.pendingParameterIds.length} parameter response${nextVerification.pendingParameterIds.length === 1 ? "" : "s"} remaining.`);
+            }
+          }
+          return;
+        }
+
+        const param = PARAMETERS_BY_ADDRESS.get(readAddressKey);
         if (param && event.checksumValid) {
           const decoded = decodeParameterValue(param, event.valueBytes);
+          const previousProgress = mappedReadProgressRef.current;
+          const nextProgress =
+            previousProgress.status === "reading" || previousProgress.status === "partial"
+              ? applyMappedReadResponse(previousProgress, readAddressKey)
+              : previousProgress;
           setValues((current) => ({ ...current, [param.id]: decoded }));
           setOriginalValues((current) => ({ ...current, [param.id]: decoded }));
-          setPatchLoaded(true);
-          setSelection({ type: "parameter", paramId: param.id });
-          setActiveModuleId(param.moduleId);
-          setActiveTabId(param.moduleId);
           setDeviceId(event.deviceId);
           setMirrorStatus(`GR-55 ${param.label} = ${formatParameterValue(param, decoded)}`);
+          setMappedReadProgress(nextProgress);
+          pushHardwareActivity({
+            kind: "parameter",
+            label: readableParameterName(param),
+            detail: `${toHex(event.address)} = ${toHex(event.valueBytes)}`,
+          });
+
+          if (nextProgress.status === "complete") {
+            clearReadTimeout();
+            setPatchLoaded(true);
+            setReadStatus(`Mapped read complete for USER ${selectedPatch.label}: ${nextProgress.received}/${nextProgress.expected}.`);
+            updateSelectedSlotRecord(selectedPatch, { status: "loaded" });
+            if (selection.type === "patch") {
+              setSelection({ type: "module", moduleId: param.moduleId });
+              setActiveModuleId(param.moduleId);
+              setActiveTabId(param.moduleId);
+            }
+          } else if (nextProgress.status === "reading") {
+            setPatchLoaded(false);
+            setReadStatus(`Reading mapped parameters: ${nextProgress.received}/${nextProgress.expected}. Last: ${readableParameterName(param)}.`);
+          } else {
+            setReadStatus(`Mapped read updated ${readableParameterName(param)}.`);
+          }
+
+          const verification = saveVerificationRef.current;
+          if (verification?.pendingParameterIds.includes(param.id)) {
+            const expected = verification.expectedValues[param.id];
+            const pendingParameterIds = verification.pendingParameterIds.filter((id) => id !== param.id);
+            const mismatches =
+              decoded === expected
+                ? verification.mismatches
+                : [
+                    ...verification.mismatches,
+                    `${readableParameterName(param)} expected ${formatParameterValue(param, expected)} but read ${formatParameterValue(param, decoded)}`,
+                  ];
+            const nextVerification = {
+              ...verification,
+              pendingParameterIds,
+              mismatches,
+            };
+            const complete = !nextVerification.pendingPatchName && pendingParameterIds.length === 0;
+            if (complete && mismatches.length === 0) {
+              setSaveVerificationState(null);
+              setOriginalPatchName(nextVerification.expectedPatchName);
+              setOriginalValues((current) => ({ ...current, ...nextVerification.expectedValues }));
+              setPreviewedDirtyChanges(false);
+              setOperationState("saved");
+              window.setTimeout(() => setOperationState("idle"), 1700);
+              setReadStatus(`Save read-back verified for USER ${nextVerification.slotLabel}.`);
+              updateSelectedSlotRecord(selectedPatch, { status: "saved", name: nextVerification.expectedPatchName });
+            } else if (complete) {
+              setSaveVerificationState(null);
+              setOperationState("error");
+              window.setTimeout(() => setOperationState("idle"), 1700);
+              setReadStatus(`Save read-back mismatch for USER ${nextVerification.slotLabel}: ${mismatches.join("; ")}.`);
+              updateSelectedSlotRecord(selectedPatch, { status: "error", error: mismatches.join("; ") });
+            } else {
+              setSaveVerificationState(nextVerification);
+              setReadStatus(`Save read-back verification pending for USER ${verification.slotLabel}: ${pendingParameterIds.length}${nextVerification.pendingPatchName ? " plus patch name" : ""} remaining.`);
+            }
+          }
         } else {
           setMirrorStatus(event.checksumValid ? `GR-55 data ${toHex(event.address)}` : "GR-55 data checksum failed");
+          pushHardwareActivity({
+            kind: "parameter",
+            label: event.checksumValid ? "Unmapped Roland data" : "Checksum failed",
+            detail: `${toHex(event.address)} ${toHex(event.valueBytes)}`,
+          });
         }
         return;
       }
@@ -321,9 +644,15 @@ export function App() {
       if (event.type === "identity-reply") {
         setDeviceId(event.deviceId);
         setMirrorStatus(`Roland identity reply, device 0x${event.deviceId.toString(16).toUpperCase()}`);
+        setReadStatus(`Identity confirmed device 0x${event.deviceId.toString(16).toUpperCase()}.`);
+        pushHardwareActivity({
+          kind: "identity",
+          label: "Identity reply",
+          detail: `Device 0x${event.deviceId.toString(16).toUpperCase()}, Roland 0x${event.manufacturerId.toString(16).toUpperCase()}`,
+        });
       }
     },
-    [incomingBankMsb],
+    [clearReadTimeout, pushHardwareActivity, resetLoadedPatchState, selectedPatch, selection.type, setMappedReadProgress, setSaveVerificationState, slotSelectionConfirmed, updateSelectedSlotRecord],
   );
 
   const midiOptions = useMemo(() => ({ onIncoming: handleIncoming }), [handleIncoming]);
@@ -335,6 +664,7 @@ export function App() {
     () => MODULES.find((module) => module.id === activeModuleId) ?? MODULES[0],
     [activeModuleId],
   );
+  const sources = SOURCE_DEFINITIONS;
   const selectedParameter = useMemo(() => {
     if (selection.type !== "parameter") {
       return null;
@@ -356,10 +686,11 @@ export function App() {
     () => Object.keys(values).filter((id) => values[id] !== originalValues[id]),
     [originalValues, values],
   );
-  const dirtyCount = dirtyParameterIds.length;
+  const patchNameDirty = patchName !== originalPatchName;
+  const dirtyCount = dirtyParameterIds.length + (patchNameDirty ? 1 : 0);
   const editorValues = compareActive ? originalValues : values;
   const activeStatus = transportMode === "bridge" ? bridge.status : transportMode === "usb" ? usb.status : midi.status;
-  const workflowState = getWorkflowState(activeStatus === "ready", patchLoaded, dirtyCount);
+  const workflowState = getWorkflowState(activeStatus === "ready", slotSelectionConfirmed, patchLoaded, dirtyCount);
   const activeConnectionLabel =
     transportMode === "bridge"
       ? bridge.deviceLabel || "Native bridge"
@@ -368,6 +699,24 @@ export function App() {
         : midi.selectedOutput?.name ?? "";
   const combinedLog = useMemo(() => [...bridge.log, ...usb.log, ...midi.log].slice(0, 100), [bridge.log, midi.log, usb.log]);
   const lastLogEntry = combinedLog[0];
+  const queueClassification = useMemo(
+    () =>
+      classifyImportedSysExMessages(importedMessages, {
+        knownAddressKeys: KNOWN_IMPORT_ADDRESS_KEYS,
+        mappedParameterCount: MAPPED_PARAMETER_COUNT,
+      }),
+    [importedMessages],
+  );
+
+  const setPatchNameDraft = useCallback((nextName: string) => {
+    setPatchName(nextName);
+    setPatchNameStatus(nextName === originalPatchName ? "loaded" : "dirty");
+    if (slotSelectionConfirmed) {
+      updateSelectedSlotRecord(selectedPatch, { status: nextName === originalPatchName ? "loaded" : "dirty", name: nextName });
+    }
+    const validation = validatePatchName(nextName);
+    setPatchNameError(validation.valid ? "" : validation.reason ?? "Invalid patch name.");
+  }, [originalPatchName, selectedPatch, slotSelectionConfirmed, updateSelectedSlotRecord]);
 
   const sendToRoland = useCallback(
     (bytes: readonly number[], label: string) => {
@@ -387,6 +736,20 @@ export function App() {
     }
   }, []);
 
+  const requireSelectedSlot = useCallback(
+    (action: string) => {
+      if (slotSelectionConfirmed) {
+        return true;
+      }
+
+      const message = `Select a USER slot before ${action}. This prevents reading, exporting, or overwriting the wrong GR-55 patch.`;
+      window.alert(message);
+      setReadStatus(message);
+      return false;
+    },
+    [slotSelectionConfirmed],
+  );
+
   const connectActiveTransport = useCallback(() => {
     if (transportMode === "bridge") {
       bridge.connectUsb();
@@ -403,27 +766,129 @@ export function App() {
 
   const selectPatch = useCallback(
     (patch: UserPatch) => {
+      if (dirtyCount > 0 && patch.userIndex !== selectedPatch.userIndex) {
+        const discard = window.confirm(
+          `Switch to USER ${patch.label}? This discards ${dirtyCount} unsaved mapped ${dirtyCount === 1 ? "change" : "changes"} in the editor.`,
+        );
+        if (!discard) {
+          return;
+        }
+      }
+
       setSelectedPatch(patch);
-      setPatchLoaded(true);
-      sendToRoland(bankSelectMsb(midiChannel, patch.bankMsb), `Bank MSB ${patch.bankMsb}`);
-      sendToRoland(programChange(midiChannel, patch.program), `Select USER ${patch.label}`);
-      setMirrorStatus(`Selected USER ${patch.label}`);
+      setSlotSelectionConfirmed(false);
+      resetLoadedPatchState();
+      setSelection({ type: "patch" });
+      const bankSent = sendToRoland(bankSelectMsb(midiChannel, patch.bankMsb), `Bank MSB ${patch.bankMsb}`);
+      const programSent = sendToRoland(programChange(midiChannel, patch.program), `Select USER ${patch.label}`);
+      const selectionSent = bankSent && programSent;
+      setSlotSelectionConfirmed(selectionSent);
+      setMirrorStatus(selectionSent ? `Selected USER ${patch.label}` : `USER ${patch.label} selected locally only`);
+      setReadStatus(
+        selectionSent
+          ? `USER ${patch.label} selected. Auto-reading mapped parameters.`
+          : `USER ${patch.label} was selected in the UI, but Bank Select / Program Change did not leave the app. Connect the GR-55 route and select it again.`,
+      );
+      if (selectionSent) {
+        updateSelectedSlotRecord(patch, { status: "reading" });
+        setAutoReadPatch(patch);
+      }
+      pushHardwareActivity({
+        kind: "program",
+        label: selectionSent ? `Select USER ${patch.label}` : `Local target USER ${patch.label}`,
+        detail: `Bank MSB ${patch.bankMsb}, PC ${patch.program}`,
+      });
     },
-    [midiChannel, sendToRoland],
+    [dirtyCount, midiChannel, pushHardwareActivity, resetLoadedPatchState, selectedPatch.userIndex, sendToRoland, updateSelectedSlotRecord],
   );
 
   const sendIdentity = useCallback(() => {
     sendToRoland(identityRequest(), "Identity request");
+    window.setTimeout(() => {
+      sendToRoland(identityRequest(), "Identity retry");
+    }, 700);
   }, [sendToRoland]);
 
-  const requestPatchLevel = useCallback(() => {
+  const retryMissingMappedReads = useCallback(
+    async (progress: MappedReadProgress) => {
+      const missingKeys = progress.expectedKeys.filter((key) => !progress.receivedKeys.includes(key));
+      if (!missingKeys.length) {
+        return;
+      }
+
+      setReadStatus(`Retrying ${missingKeys.length} missing mapped reads for USER ${selectedPatch.label}.`);
+
+      for (const key of missingKeys) {
+        const param = PARAMETERS_BY_ADDRESS.get(key);
+        if (!param) {
+          continue;
+        }
+
+        sendToRoland(makeDataRequestMessage(param.address, parameterDataSize(param), deviceId), `Retry read ${param.label}`);
+        await delay(MAPPED_READ_RETRY_DELAY_MS);
+      }
+
+      window.setTimeout(() => {
+        const latest = mappedReadProgressRef.current;
+        if (latest.status === "complete") {
+          return;
+        }
+
+        const partial = markMappedReadPartial(latest);
+        setMappedReadProgress(partial);
+        setReadStatus(`Mapped read partial for USER ${selectedPatch.label}: ${partial.received}/${partial.expected}. Press Read Patch to retry.`);
+      }, 1200);
+    },
+    [deviceId, selectedPatch.label, sendToRoland, setMappedReadProgress],
+  );
+
+  const requestMappedPatch = useCallback(async () => {
+    clearReadTimeout();
+    if (!requireSelectedSlot("reading mapped parameters")) {
+      return;
+    }
+
     showOperationPulse("sending");
-    setPatchLoaded(true);
-    sendToRoland(
-      makeDataRequestMessage([0x18, 0x00, 0x02, 0x30], [0x00, 0x00, 0x00, 0x02], deviceId),
-      "Request temporary patch level",
-    );
-  }, [deviceId, sendToRoland, showOperationPulse]);
+    setPatchLoaded(false);
+    setPatchName("");
+    setOriginalPatchName("");
+    setPatchNameStatus("reading");
+    setPatchNameError("");
+    setSaveVerificationState(null);
+    setMappedReadProgress(createMappedReadProgress(MAPPED_PARAMETER_KEYS));
+    setValues(createInitialParameterValues());
+    setOriginalValues(createInitialParameterValues());
+    setUndoStack([]);
+    setRedoStack([]);
+    setCompareActive(false);
+    setPreviewedDirtyChanges(false);
+    setSelection({ type: "patch" });
+    updateSelectedSlotRecord(selectedPatch, { status: "reading" });
+    const readMessages = makeMappedPatchReadMessages(deviceId);
+    setReadStatus(`Requesting patch name and ${readMessages.length} mapped temporary-patch parameters from USER ${selectedPatch.label}.`);
+
+    sendToRoland(makePatchNameReadMessage(deviceId), "Read patch name");
+    await delay(PATCH_NAME_READ_DELAY_MS);
+
+    for (const message of readMessages) {
+      sendToRoland(message.bytes, message.label);
+      await delay(MAPPED_READ_SEND_DELAY_MS);
+    }
+
+    if (mappedReadProgressRef.current.status === "complete") {
+      setReadStatus(
+        `Mapped read complete for USER ${selectedPatch.label}: ${mappedReadProgressRef.current.received}/${mappedReadProgressRef.current.expected}.`,
+      );
+    } else {
+      setReadStatus(`Mapped read requests sent for USER ${selectedPatch.label}. Waiting for GR-55 DT1 responses.`);
+    }
+    readTimeoutRef.current = window.setTimeout(() => {
+      const latest = mappedReadProgressRef.current;
+      if (latest.status === "reading") {
+        void retryMissingMappedReads(latest);
+      }
+    }, MAPPED_READ_TIMEOUT_MS);
+  }, [clearReadTimeout, deviceId, requireSelectedSlot, retryMissingMappedReads, selectedPatch, sendToRoland, setMappedReadProgress, setSaveVerificationState, showOperationPulse, updateSelectedSlotRecord]);
 
   const setParameter = useCallback(
     (param: ParameterDefinition, nextValue: number, shouldSend = liveWrite, trackHistory = true) => {
@@ -446,7 +911,8 @@ export function App() {
       setActiveModuleId(param.moduleId);
       setActiveTabId(param.moduleId);
 
-      const sent = shouldSend
+      const canSendLive = shouldSend && patchLoaded && activeStatus === "ready";
+      const sent = canSendLive
         ? sendToRoland(
             makeParameterMessage(param, bounded, deviceId),
             `${moduleShortTitle(param.moduleId)} ${param.label}: ${formatParameterValue(param, bounded)}`,
@@ -463,11 +929,11 @@ export function App() {
         target: moduleShortTitle(param.moduleId),
         before: formatParameterValue(param, currentValue),
         after: formatParameterValue(param, bounded),
-        behavior: sent ? "Live Send" : "Staged",
+        behavior: sent ? "Live Send" : patchLoaded ? "Staged" : "Read first",
         status: sent ? "live" : "pending",
       });
     },
-    [deviceId, liveWrite, sendToRoland, values],
+    [activeStatus, deviceId, patchLoaded, liveWrite, sendToRoland, values],
   );
 
   const applyHistoryItem = useCallback(
@@ -514,6 +980,11 @@ export function App() {
 
   const sendModule = useCallback(
     (module: ModuleDefinition) => {
+      if (!patchLoaded) {
+        setReadStatus("Read mapped parameters before sending a module to the GR-55.");
+        return;
+      }
+
       showOperationPulse("sending");
       module.parameters.forEach((param) => {
         const sent = sendToRoland(
@@ -525,15 +996,66 @@ export function App() {
         }
       });
     },
-    [deviceId, sendToRoland, showOperationPulse, values],
+    [deviceId, patchLoaded, sendToRoland, showOperationPulse, values],
   );
+
+  const sendParametersToTemporaryPatch = useCallback(
+    async (parameterIds: readonly string[]) => {
+      const uniqueIds = [...new Set(parameterIds)];
+      if (!uniqueIds.length) {
+        return true;
+      }
+
+      let allSent = true;
+      for (const parameterId of uniqueIds) {
+        const param = [...PARAMETERS_BY_ADDRESS.values()].find((candidate) => candidate.id === parameterId);
+        if (!param) {
+          allSent = false;
+          continue;
+        }
+
+        const sent = sendToRoland(
+          makeParameterMessage(param, values[param.id], deviceId),
+          `${moduleShortTitle(param.moduleId)} ${param.label}: ${formatParameterValue(param, values[param.id])}`,
+        );
+
+        if (sent) {
+          setLastSentByParameter((current) => ({ ...current, [param.id]: new Date().toLocaleTimeString() }));
+        } else {
+          allSent = false;
+        }
+
+        await delay(PARAMETER_WRITE_SEND_DELAY_MS);
+      }
+
+      return allSent;
+    },
+    [deviceId, sendToRoland, values],
+  );
+
+  const sendPatchNameToTemporaryPatch = useCallback(async () => {
+    if (!patchNameDirty) {
+      return true;
+    }
+
+    const validation = validatePatchName(patchName);
+    if (!validation.valid) {
+      setPatchNameError(validation.reason ?? "Invalid patch name.");
+      setReadStatus(validation.reason ?? "Patch name is invalid.");
+      return false;
+    }
+
+    const sent = sendToRoland(makePatchNameWriteMessage(patchName, deviceId), `Patch name: ${patchName || "(blank)"}`);
+    await delay(PARAMETER_WRITE_SEND_DELAY_MS);
+    return sent;
+  }, [deviceId, patchName, patchNameDirty, sendToRoland]);
 
   const requestModule = useCallback(
     async (module: ModuleDefinition) => {
       showOperationPulse("sending");
       for (const param of module.parameters) {
         sendToRoland(makeDataRequestMessage(param.address, parameterDataSize(param), deviceId), `Read ${param.label}`);
-        await delay(24);
+        await delay(MODULE_READ_SEND_DELAY_MS);
       }
     },
     [deviceId, sendToRoland, showOperationPulse],
@@ -571,23 +1093,27 @@ export function App() {
       if (!source) {
         return;
       }
-      setPreviewedDirtyChanges(false);
-      const before = source[field];
-      setSources((current) =>
-        current.map((item) => (item.id === sourceId ? { ...item, [field]: value } : item)),
-      );
+      const param = sourceFieldParam(source, field);
+      if (!param) {
+        setReadStatus(`${source.label} ${sourceFieldLabel(field)} is not mapped yet.`);
+        return;
+      }
+
+      const currentValue = values[param.id] ?? param.defaultValue;
+      const nextValue = typeof value === "boolean" ? (value ? 1 : 0) : Number(value);
+      setParameter(param, nextValue);
       setSelection({ type: "source", sourceId, field });
       setInteractionHud({
         key: `${sourceId}-${field}-${Date.now()}`,
         label: `${source.label} ${sourceFieldLabel(field)}`,
         target: source.block,
-        before: formatSourceValue(field, before),
-        after: formatSourceValue(field, value),
-        behavior: "Staged",
-        status: "staged",
+        before: formatParameterValue(param, currentValue),
+        after: formatParameterValue(param, normalizeParameterValue(param, nextValue)),
+        behavior: liveWrite ? "Live Preview" : "Staged",
+        status: liveWrite ? "live" : "staged",
       });
     },
-    [sources],
+    [liveWrite, setParameter, sources, values],
   );
 
   const inspectSource = useCallback((sourceId: string, field: SourceField = "level") => {
@@ -596,37 +1122,127 @@ export function App() {
 
   const revertSourceField = useCallback(
     (sourceId: string, field: SourceField) => {
-      const originalSource = SOURCE_DEFAULTS.find((source) => source.id === sourceId);
-      if (!originalSource) {
+      const source = sources.find((item) => item.id === sourceId);
+      const param = source ? sourceFieldParam(source, field) : null;
+      if (!source || !param) {
         return;
       }
-      updateSource(sourceId, field, originalSource[field]);
+      setParameter(param, originalValues[param.id] ?? param.defaultValue);
     },
-    [updateSource],
+    [originalValues, setParameter, sources],
   );
 
-  const sendSaveToSelectedPatch = useCallback(() => {
-    if (!window.confirm(`Overwrite USER ${selectedPatch.label} on the GR-55 with the current temporary patch?`)) {
+  const sendSaveToSelectedPatch = useCallback(async () => {
+    if (!requireSelectedSlot("saving to a USER slot")) {
+      return;
+    }
+
+    if (!patchLoaded) {
+      window.alert("Read mapped parameters from the selected USER slot before saving. This avoids overwriting a slot from default UI values.");
+      return;
+    }
+
+    const validation = validatePatchName(patchName);
+    if (!validation.valid) {
+      setPatchNameError(validation.reason ?? "Invalid patch name.");
+      setReadStatus(validation.reason ?? "Patch name is invalid.");
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Overwrite USER ${selectedPatch.label} on the GR-55 with the current temporary patch? This build can export mapped SysEx/JSON but does not implement a full raw GR-55 bulk backup yet.`,
+      )
+    ) {
       return;
     }
 
     showOperationPulse("sending");
+    const nameFlushed = await sendPatchNameToTemporaryPatch();
+    if (!nameFlushed) {
+      showOperationPulse("error");
+      setReadStatus("Save stopped because the patch name write did not leave the app.");
+      return;
+    }
+
+    const flushed = await sendParametersToTemporaryPatch(dirtyParameterIds);
+    if (!flushed) {
+      showOperationPulse("error");
+      setReadStatus("Save stopped because one or more mapped parameter writes did not leave the app.");
+      return;
+    }
+
+    const expectedValues = Object.fromEntries(dirtyParameterIds.map((parameterId) => [parameterId, values[parameterId]]));
+    const verification: SaveVerification = {
+      slotLabel: selectedPatch.label,
+      expectedPatchName: patchName,
+      expectedValues,
+      pendingPatchName: true,
+      pendingParameterIds: [...dirtyParameterIds],
+      mismatches: [],
+    };
+
+    await delay(dirtyParameterIds.length || patchNameDirty ? 140 : 0);
     const sent = sendToRoland(makeSaveUserPatchMessage(selectedPatch.userIndex, deviceId), `Save temp to USER ${selectedPatch.label}`);
     if (sent) {
-      setOriginalValues(values);
-      setPreviewedDirtyChanges(false);
-      window.setTimeout(() => showOperationPulse("saved"), 240);
+      setSaveVerificationState(verification);
+      setReadStatus(`Save command sent for USER ${selectedPatch.label}. Reading back patch name and ${dirtyParameterIds.length} changed parameter${dirtyParameterIds.length === 1 ? "" : "s"} for verification.`);
+      await delay(420);
+      sendToRoland(makePatchNameReadMessage(deviceId), "Verify patch name");
+      await delay(SAVE_VERIFY_READ_DELAY_MS);
+      for (const parameterId of dirtyParameterIds) {
+        const param = PARAMETERS_BY_ID.get(parameterId);
+        if (!param) {
+          continue;
+        }
+        sendToRoland(makeDataRequestMessage(param.address, parameterDataSize(param), deviceId), `Verify ${param.label}`);
+        await delay(SAVE_VERIFY_READ_DELAY_MS);
+      }
+      window.setTimeout(() => {
+        const pending = saveVerificationRef.current;
+        if (!pending || pending.slotLabel !== verification.slotLabel) {
+          return;
+        }
+        const missing = [
+          pending.pendingPatchName ? "patch name" : "",
+          ...pending.pendingParameterIds,
+        ].filter(Boolean);
+        setSaveVerificationState(null);
+        setOperationState("error");
+        window.setTimeout(() => setOperationState("idle"), 1700);
+        setReadStatus(`Save read-back timeout for USER ${verification.slotLabel}: no response for ${missing.join(", ")}.`);
+        updateSelectedSlotRecord(selectedPatch, { status: "error", name: patchName, error: "read-back timeout" });
+      }, 3500 + dirtyParameterIds.length * SAVE_VERIFY_READ_DELAY_MS);
     } else {
+      setSaveVerificationState(null);
       showOperationPulse("error");
     }
-  }, [deviceId, selectedPatch, sendToRoland, showOperationPulse, values]);
+  }, [deviceId, dirtyParameterIds, patchLoaded, patchName, patchNameDirty, requireSelectedSlot, selectedPatch, sendParametersToTemporaryPatch, sendPatchNameToTemporaryPatch, sendToRoland, setSaveVerificationState, showOperationPulse, updateSelectedSlotRecord, values]);
 
-  const sendPreviewChanges = useCallback(() => {
-    sendModule(activeModule);
+  const sendPreviewChanges = useCallback(async () => {
+    if (!patchLoaded) {
+      window.alert("Read mapped parameters from the selected USER slot before sending staged edits.");
+      setReadStatus("Staged edits were not sent because the selected slot has not completed a mapped read.");
+      return;
+    }
+
+    showOperationPulse("sending");
+    const nameFlushed = await sendPatchNameToTemporaryPatch();
+    if (!nameFlushed) {
+      showOperationPulse("error");
+      return;
+    }
+
+    const flushed = await sendParametersToTemporaryPatch(dirtyParameterIds);
+    if (!flushed) {
+      showOperationPulse("error");
+      return;
+    }
     if (dirtyCount > 0) {
       setPreviewedDirtyChanges(true);
+      setReadStatus(`${dirtyCount} staged ${dirtyCount === 1 ? "change" : "changes"} sent to temporary memory for preview.`);
     }
-  }, [activeModule, dirtyCount, sendModule]);
+  }, [dirtyCount, dirtyParameterIds, patchLoaded, sendParametersToTemporaryPatch, sendPatchNameToTemporaryPatch, showOperationPulse]);
 
   const clearTemporaryPatch = useCallback(() => {
     Object.entries(CLEAR_TEMP_PARAMETER_VALUES).forEach(([parameterId, nextValue]) => {
@@ -639,6 +1255,10 @@ export function App() {
   }, [setParameter]);
 
   const clearSelectedUserPatch = useCallback(() => {
+    if (!requireSelectedSlot("clearing a USER slot")) {
+      return;
+    }
+
     if (
       !window.confirm(
         `Mute the temporary patch and overwrite USER ${selectedPatch.label}? This is the closest safe equivalent of deleting a GR-55 user patch.`,
@@ -652,7 +1272,7 @@ export function App() {
       showOperationPulse("sending");
       sendToRoland(makeSaveUserPatchMessage(selectedPatch.userIndex, deviceId), `Clear USER ${selectedPatch.label}`);
     }, 180);
-  }, [clearTemporaryPatch, deviceId, selectedPatch, sendToRoland, showOperationPulse]);
+  }, [clearTemporaryPatch, deviceId, requireSelectedSlot, selectedPatch, sendToRoland, showOperationPulse]);
 
   const sendRawSysEx = useCallback(() => {
     try {
@@ -669,6 +1289,41 @@ export function App() {
     }
   }, [rawHex, sendToRoland, showOperationPulse]);
 
+  const applyImportedMappedMessages = useCallback(
+    (messages: ImportedSysExMessage[]) => {
+      const parsed = parseMappedPatchMessages(messages);
+      const mappedCount = parsed.mappedMessages + parsed.patchNameMessages;
+      if (!mappedCount) {
+        return;
+      }
+
+      if (Object.keys(parsed.values).length) {
+        setValues((current) => ({ ...current, ...parsed.values }));
+        setOriginalValues((current) => ({ ...current, ...parsed.values }));
+        setPatchLoaded(true);
+      }
+
+      if (parsed.patchName !== undefined) {
+        setPatchName(parsed.patchName);
+        setOriginalPatchName(parsed.patchName);
+        setPatchNameStatus("loaded");
+        setPatchNameError("");
+        if (slotSelectionConfirmed) {
+          updateSelectedSlotRecord(selectedPatch, { status: "loaded", name: parsed.patchName });
+        }
+      }
+
+      setPreviewedDirtyChanges(false);
+      setCompareActive(false);
+      setReadStatus(
+        `Imported SysEx parsed ${parsed.mappedMessages} mapped parameter${parsed.mappedMessages === 1 ? "" : "s"}${
+          parsed.patchName !== undefined ? ` and patch name "${parsed.patchName}"` : ""
+        }. ${parsed.checksumErrors ? `${parsed.checksumErrors} checksum error${parsed.checksumErrors === 1 ? "" : "s"} ignored.` : ""}`,
+      );
+    },
+    [selectedPatch, slotSelectionConfirmed, updateSelectedSlotRecord],
+  );
+
   const importFromRawHex = useCallback(() => {
     try {
       const messages = parseImportedSysEx(rawHex).map((message, index) => ({
@@ -676,12 +1331,13 @@ export function App() {
         label: `Paste ${index + 1}`,
       }));
       setImportedMessages((current) => [...messages, ...current]);
+      applyImportedMappedMessages(messages);
       setRawError("");
       setLibraryError("");
     } catch (error) {
       setRawError(error instanceof Error ? error.message : "Invalid SysEx paste.");
     }
-  }, [rawHex]);
+  }, [applyImportedMappedMessages, rawHex]);
 
   const pasteClipboardToRaw = useCallback(async () => {
     try {
@@ -696,8 +1352,9 @@ export function App() {
 
   const addImportedMessages = useCallback((messages: ImportedSysExMessage[]) => {
     setImportedMessages((current) => [...messages, ...current]);
+    applyImportedMappedMessages(messages);
     setLibraryError("");
-  }, []);
+  }, [applyImportedMappedMessages]);
 
   const deleteImportedMessage = useCallback((index: number) => {
     setImportedMessages((current) => current.filter((_, currentIndex) => currentIndex !== index));
@@ -717,9 +1374,43 @@ export function App() {
   const sendImportedQueue = useCallback(async () => {
     for (const message of importedMessages) {
       sendToRoland(message.bytes, message.label);
-      await delay(24);
+      await delay(PARAMETER_WRITE_SEND_DELAY_MS);
     }
   }, [importedMessages, sendToRoland]);
+
+  const sendImportedQueueToSelectedPatch = useCallback(async () => {
+    if (!requireSelectedSlot("saving an imported queue to a USER slot")) {
+      return;
+    }
+
+    if (!importedMessages.length) {
+      setLibraryError("Queue is empty.");
+      return;
+    }
+
+    if (
+      !window.confirm(
+        `Send ${importedMessages.length} imported SysEx ${importedMessages.length === 1 ? "message" : "messages"} to temporary memory, then overwrite USER ${selectedPatch.label}?`,
+      )
+    ) {
+      return;
+    }
+
+    showOperationPulse("sending");
+    for (const message of importedMessages) {
+      sendToRoland(message.bytes, message.label);
+      await delay(PARAMETER_WRITE_SEND_DELAY_MS);
+    }
+
+    await delay(160);
+    const sent = sendToRoland(makeSaveUserPatchMessage(selectedPatch.userIndex, deviceId), `Save imported queue to USER ${selectedPatch.label}`);
+    showOperationPulse(sent ? "saved" : "error");
+    setReadStatus(
+      sent
+        ? `Imported SysEx queue sent to temporary memory and save command sent for USER ${selectedPatch.label}.`
+        : "Imported queue was not saved because the save command did not leave the app.",
+    );
+  }, [deviceId, importedMessages, requireSelectedSlot, selectedPatch, sendToRoland, showOperationPulse]);
 
   const exportImportedQueue = useCallback(() => {
     if (!importedMessages.length) {
@@ -732,7 +1423,70 @@ export function App() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }, [importedMessages]);
 
+  const exportMappedPatch = useCallback(() => {
+    if (!requireSelectedSlot("exporting a mapped patch")) {
+      return;
+    }
+
+    if (!patchLoaded) {
+      const message = "Read mapped parameters before exporting. Otherwise the file would contain default UI values, not the GR-55 patch.";
+      window.alert(message);
+      setReadStatus(message);
+      return;
+    }
+
+    const messages = [
+      {
+        label: "Patch name",
+        bytes: makePatchNameWriteMessage(patchName, deviceId),
+      },
+      ...MODULES.flatMap((module) =>
+        module.parameters.map((param) => ({
+        label: `${module.shortTitle} ${param.label}`,
+        bytes: makeParameterMessage(param, values[param.id], deviceId),
+        })),
+      ),
+    ];
+    const url = makeDownloadBlobUrl(messages);
+    downloadUrl(url, `gr55-user-${selectedPatch.label}-mapped-patch.txt`);
+    const parsedUrl = makeJsonDownloadUrl({
+      kind: "gr55-control-room.mapped-patch",
+      exportedAt: new Date().toISOString(),
+      slot: {
+        label: selectedPatch.label,
+        userIndex: selectedPatch.userIndex,
+        bankMsb: selectedPatch.bankMsb,
+        program: selectedPatch.program,
+      },
+      patchName,
+      hardwareVerification: "mapped-export-only; full raw bulk backup is not implemented",
+      parameters: MODULES.flatMap((module) =>
+        module.parameters.map((param) => ({
+          id: param.id,
+          section: param.section,
+          displayName: param.displayName,
+          value: values[param.id],
+          formattedValue: formatParameterValue(param, values[param.id]),
+          address: toHex(param.address),
+          parser: param.parser,
+          serializer: param.serializer,
+          hardwareVerificationStatus: param.hardwareVerificationStatus,
+        })),
+      ),
+    });
+    downloadUrl(parsedUrl, `gr55-user-${selectedPatch.label}-mapped-patch.json`);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    window.setTimeout(() => URL.revokeObjectURL(parsedUrl), 1000);
+  }, [deviceId, patchLoaded, patchName, requireSelectedSlot, selectedPatch, values]);
+
   const exportCurrentModule = useCallback(() => {
+    if (!patchLoaded) {
+      const message = "Read mapped parameters before exporting a module. Otherwise the file would contain default UI values.";
+      window.alert(message);
+      setReadStatus(message);
+      return;
+    }
+
     const messages = activeModule.parameters.map((param) => ({
       label: `${activeModule.shortTitle} ${param.label}`,
       bytes: makeParameterMessage(param, values[param.id], deviceId),
@@ -740,16 +1494,23 @@ export function App() {
     const url = makeDownloadBlobUrl(messages);
     downloadUrl(url, `gr55-${activeModule.shortTitle.toLowerCase()}-module.txt`);
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }, [activeModule, deviceId, values]);
+  }, [activeModule, deviceId, patchLoaded, values]);
 
   const copyCurrentModule = useCallback(() => {
+    if (!patchLoaded) {
+      const message = "Read mapped parameters before copying module SysEx. Otherwise the clipboard would contain default UI values.";
+      window.alert(message);
+      setReadStatus(message);
+      return;
+    }
+
     const messages = activeModule.parameters.map((param) => ({
       label: `${activeModule.shortTitle} ${param.label}`,
       bytes: makeParameterMessage(param, values[param.id], deviceId),
     }));
 
     void navigator.clipboard?.writeText(serializeMessagesAsHex(messages));
-  }, [activeModule, deviceId, values]);
+  }, [activeModule, deviceId, patchLoaded, values]);
 
   const handleTabChange = useCallback((tabId: EditorTabId) => {
     setActiveTabId(tabId);
@@ -772,69 +1533,24 @@ export function App() {
         return;
       }
 
-      if (intent === "change-instrument") {
-        updateSource(sourceId, "tone", source.toneOptions[(source.toneOptions.indexOf(source.tone) + 1) % source.toneOptions.length]);
-        return;
-      }
-
-      if (intent === "brighter") {
-        updateSource(sourceId, "brightness", clamp(source.brightness + 10, 0, 100));
-        return;
-      }
-
-      if (intent === "darker") {
-        updateSource(sourceId, "brightness", clamp(source.brightness - 10, 0, 100));
-        return;
-      }
-
-      if (intent === "softer-attack") {
-        updateSource(sourceId, "attack", clamp(source.attack + 10, 0, 100));
-        return;
-      }
-
-      if (intent === "sharper-attack") {
-        updateSource(sourceId, "attack", clamp(source.attack - 10, 0, 100));
-        return;
-      }
-
-      if (intent === "forward") {
-        updateSource(sourceId, "level", clamp(source.level + 8, 0, 100));
-        updateSource(sourceId, "fxSend", clamp(source.fxSend - 6, 0, 100));
-        return;
-      }
-
-      if (intent === "back") {
-        updateSource(sourceId, "level", clamp(source.level - 8, 0, 100));
-        updateSource(sourceId, "fxSend", clamp(source.fxSend + 10, 0, 100));
-        return;
-      }
-
-      updateSource(sourceId, "fxSend", clamp(source.fxSend + 10, 0, 100));
+      setReadStatus(`${source.label} has no macro action for "${intent}". Use the mapped GR-55 source controls instead.`);
     },
-    [sources, updateSource],
+    [sources],
   );
 
   const applyModuleIntent = useCallback(
     (moduleId: ParameterModuleId, intent: ModuleIntent) => {
+      if (intent !== "reset") {
+        return;
+      }
+
       const module = MODULES.find((item) => item.id === moduleId);
       if (!module) {
         return;
       }
-
-      if (intent === "reset") {
-        onRevertModule(module, originalValues, setParameter);
-        return;
-      }
-
-      const target = moduleIntentTarget(module, intent);
-      if (!target) {
-        return;
-      }
-
-      const currentValue = values[target.param.id] ?? target.param.defaultValue;
-      setParameter(target.param, currentValue + target.delta);
+      onRevertModule(module, originalValues, setParameter);
     },
-    [originalValues, setParameter, values],
+    [originalValues, setParameter],
   );
 
   useEffect(() => {
@@ -871,6 +1587,52 @@ export function App() {
     }
   }, [compareActive, dirtyCount]);
 
+  useEffect(() => {
+    if (transportMode !== "bridge" || bridge.status === "ready" || bridge.status === "pending") {
+      return;
+    }
+
+    if (!bridge.socketReady || bridge.usbDevices.length === 0 || bridgeAutoUsbAttemptRef.current) {
+      return;
+    }
+
+    bridgeAutoUsbAttemptRef.current = true;
+    bridge.connectUsb();
+  }, [bridge, transportMode]);
+
+  useEffect(() => {
+    if (activeStatus !== "ready") {
+      return;
+    }
+
+    const identityKey = `${transportMode}:${activeConnectionLabel || "unknown"}`;
+    if (identityRequestKeyRef.current === identityKey) {
+      return;
+    }
+
+    identityRequestKeyRef.current = identityKey;
+    const timer = window.setTimeout(() => sendIdentity(), 180);
+    return () => window.clearTimeout(timer);
+  }, [activeConnectionLabel, activeStatus, sendIdentity, transportMode]);
+
+  useEffect(() => {
+    if (!autoReadPatch || activeStatus !== "ready" || autoReadPatch.userIndex !== selectedPatch.userIndex) {
+      return;
+    }
+
+    const patch = autoReadPatch;
+    const timer = window.setTimeout(() => {
+      if (patch.userIndex === selectedPatch.userIndex) {
+        setAutoReadPatch((current) => (current?.userIndex === patch.userIndex ? null : current));
+        void requestMappedPatch();
+      }
+    }, PATCH_SELECT_SETTLE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [activeStatus, autoReadPatch, requestMappedPatch, selectedPatch.userIndex]);
+
+  useEffect(() => clearReadTimeout, [clearReadTimeout]);
+
   return (
     <main className="mac-window" aria-label="Roland GR-55 patch editor">
       <TopToolbar
@@ -878,6 +1640,7 @@ export function App() {
         outputName={activeConnectionLabel}
         transportMode={transportMode}
         selectedPatch={selectedPatch}
+        slotSelectionConfirmed={slotSelectionConfirmed}
         dirtyCount={dirtyCount}
         patchLoaded={patchLoaded}
         workflowState={workflowState}
@@ -891,7 +1654,7 @@ export function App() {
         onTransportModeChange={setTransportMode}
         onConnect={connectActiveTransport}
         onIdentity={sendIdentity}
-        onReadPatch={requestPatchLevel}
+        onReadPatch={() => void requestMappedPatch()}
         onSendChanges={sendPreviewChanges}
         onSavePatch={sendSaveToSelectedPatch}
         onToggleCompare={() => setCompareActive((current) => !current)}
@@ -906,6 +1669,7 @@ export function App() {
         onUsbRefresh={usb.refresh}
         onCopyModule={copyCurrentModule}
         onExportModule={exportCurrentModule}
+        onExportMappedPatch={exportMappedPatch}
         onClearTemporaryPatch={clearTemporaryPatch}
         onClearSelectedUserPatch={clearSelectedUserPatch}
         onPanic={sendPanic}
@@ -963,8 +1727,19 @@ export function App() {
           <PatchLibrary
             searchRef={patchSearchRef}
             selectedPatch={selectedPatch}
+            slotSelectionConfirmed={slotSelectionConfirmed}
+            patchLoaded={patchLoaded}
+            readStatus={readStatus}
             dirtyCount={dirtyCount}
+            patchName={patchName}
+            patchNameDirty={patchNameDirty}
+            patchSlots={patchSlots}
             onSelectPatch={selectPatch}
+            onReadPatch={() => void requestMappedPatch()}
+            onSavePatch={() => void sendSaveToSelectedPatch()}
+            onClearSelectedPatch={clearSelectedUserPatch}
+            onExportMappedPatch={exportMappedPatch}
+            onOpenImport={() => setUtilityDrawerOpen(true)}
           />
 
           <QuickMonitor
@@ -973,15 +1748,26 @@ export function App() {
             bridgeStatus={bridge.status}
             usbStatus={usb.status}
             midiStatus={midi.status}
+            hardwareActivity={hardwareActivity}
           />
         </aside>
 
         <section className="editor-pane" aria-label="Patch editor">
           <PatchIdentity
             selectedPatch={selectedPatch}
+            slotSelectionConfirmed={slotSelectionConfirmed}
             dirtyCount={dirtyCount}
             operationState={operationState}
+            patchLoaded={patchLoaded}
+            readStatus={readStatus}
+            patchName={patchName}
+            patchNameDirty={patchNameDirty}
+            patchNameStatus={patchNameStatus}
+            patchNameError={patchNameError}
+            onPatchNameChange={setPatchNameDraft}
           />
+
+          <ModuleTabs tabs={EDITOR_TABS} activeTabId={activeTabId} values={editorValues} onSelect={handleTabChange} />
 
           <IntentPatchMap
             sources={sources}
@@ -994,6 +1780,8 @@ export function App() {
 
           <SourceMixer
             sources={sources}
+            values={editorValues}
+            originalValues={originalValues}
             selection={selection}
             hud={interactionHud}
             onChange={updateSource}
@@ -1021,7 +1809,7 @@ export function App() {
             onExportModule={exportCurrentModule}
           />
 
-          {activeTabId === "pedal" || activeTabId === "assigns" || activeTabId === "sysex" || activeTabId === "system" ? (
+          {activeTabId === "tones" || activeTabId === "pedal" || activeTabId === "assigns" || activeTabId === "sysex" || activeTabId === "system" ? (
             <SpecialTabPanel
               tabId={activeTabId}
               selectedPatch={selectedPatch}
@@ -1071,11 +1859,13 @@ export function App() {
         onImportRaw={importFromRawHex}
         onPasteClipboard={() => void pasteClipboardToRaw()}
         messages={importedMessages}
+        queueClassification={queueClassification}
         libraryError={libraryError}
         onLibraryError={setLibraryError}
         onAddMessages={addImportedMessages}
         onSendMessage={sendImportedMessage}
         onSendQueue={() => void sendImportedQueue()}
+        onSendQueueToPatch={() => void sendImportedQueueToSelectedPatch()}
         onDeleteMessage={deleteImportedMessage}
         onClearQueue={clearImportedQueue}
         onExportQueue={exportImportedQueue}
@@ -1089,6 +1879,7 @@ function TopToolbar({
   outputName,
   transportMode,
   selectedPatch,
+  slotSelectionConfirmed,
   dirtyCount,
   patchLoaded,
   workflowState,
@@ -1117,6 +1908,7 @@ function TopToolbar({
   onUsbRefresh,
   onCopyModule,
   onExportModule,
+  onExportMappedPatch,
   onClearTemporaryPatch,
   onClearSelectedUserPatch,
   onPanic,
@@ -1125,6 +1917,7 @@ function TopToolbar({
   outputName: string;
   transportMode: TransportMode;
   selectedPatch: UserPatch;
+  slotSelectionConfirmed: boolean;
   dirtyCount: number;
   patchLoaded: boolean;
   workflowState: WorkflowState;
@@ -1153,6 +1946,7 @@ function TopToolbar({
   onUsbRefresh: () => void;
   onCopyModule: () => void;
   onExportModule: () => void;
+  onExportMappedPatch: () => void;
   onClearTemporaryPatch: () => void;
   onClearSelectedUserPatch: () => void;
   onPanic: () => void;
@@ -1179,8 +1973,12 @@ function TopToolbar({
       </div>
 
       <button type="button" className="patch-select-button" onClick={onFocusSearch}>
-        USER {selectedPatch.label}
-        {dirtyCount ? <span>{dirtyCount} unsaved</span> : <span>clean</span>}
+        {slotSelectionConfirmed ? `USER ${selectedPatch.label}` : "No slot selected"}
+        {slotSelectionConfirmed ? (
+          dirtyCount ? <span>{dirtyCount} unsaved</span> : <span>clean</span>
+        ) : (
+          <span>choose USER slot</span>
+        )}
       </button>
 
       <div className="toolbar-group action-group" aria-label="Primary workflow actions">
@@ -1188,6 +1986,11 @@ function TopToolbar({
           <button type="button" className="toolbar-button primary" onClick={onConnect}>
             <Plugs size={17} aria-hidden="true" />
             Connect
+          </button>
+        ) : workflowState === "select-slot" ? (
+          <button type="button" className="toolbar-button primary" onClick={onFocusSearch}>
+            <Command size={17} aria-hidden="true" />
+            Select USER slot
           </button>
         ) : workflowState === "ready-to-read" ? (
           <button type="button" className="toolbar-button primary" onClick={onReadPatch}>
@@ -1198,11 +2001,11 @@ function TopToolbar({
           <>
             <button type="button" className="toolbar-button secondary" onClick={onSendChanges}>
               <Power size={17} aria-hidden="true" />
-              {previewedDirtyChanges ? "Preview Again" : "Send Preview"}
+              {previewedDirtyChanges ? "Send Again" : "Send Staged"}
             </button>
             <button type="button" className={`toolbar-button secondary ${compareActive ? "is-selected" : ""}`} disabled={!canCompare} aria-pressed={compareActive} onClick={onToggleCompare}>
               <CheckCircle size={17} aria-hidden="true" />
-              Compare
+              Show Original
             </button>
             <button type="button" className="toolbar-button primary" onClick={onSavePatch}>
               <FloppyDisk size={17} aria-hidden="true" />
@@ -1232,7 +2035,7 @@ function TopToolbar({
         </div>
         {operationState !== "idle" ? (
           <span className={`operation-chip state-${operationState}`}>
-            {operationState === "sending" ? "Sending" : operationState === "saved" ? "Saved" : "Send failed"}
+            {operationState === "sending" ? "Sending" : operationState === "saved" ? "Verified" : "Send failed"}
           </span>
         ) : null}
         <details className="toolbar-more">
@@ -1273,7 +2076,7 @@ function TopToolbar({
               </button>
               <button type="button" disabled={!canCompare} aria-pressed={compareActive} onClick={onToggleCompare}>
                 <CheckCircle size={15} aria-hidden="true" />
-                Compare
+                Show original values
               </button>
               <button type="button" onClick={onOpenUtilityDrawer}>
                 <Queue size={15} aria-hidden="true" />
@@ -1283,7 +2086,8 @@ function TopToolbar({
             <details className="menu-section nested-disclosure">
               <summary>Module and maintenance</summary>
               <button type="button" onClick={onCopyModule}>Copy module SysEx</button>
-              <button type="button" onClick={onExportModule}>Export module</button>
+              <button type="button" onClick={onExportModule}>Export mapped module</button>
+              <button type="button" onClick={onExportMappedPatch}>Export mapped patch</button>
               <button type="button" onClick={onBridgeRefresh}>Refresh bridge</button>
               <button type="button" onClick={onMidiRefresh}>Refresh MIDI</button>
               <button type="button" onClick={onUsbRefresh}>Refresh USB</button>
@@ -1592,27 +2396,54 @@ function DeviceSidebar({
 function PatchLibrary({
   searchRef,
   selectedPatch,
+  slotSelectionConfirmed,
+  patchLoaded,
+  readStatus,
   dirtyCount,
+  patchName,
+  patchNameDirty,
+  patchSlots,
   onSelectPatch,
+  onReadPatch,
+  onSavePatch,
+  onClearSelectedPatch,
+  onExportMappedPatch,
+  onOpenImport,
 }: {
   searchRef: React.RefObject<HTMLInputElement | null>;
   selectedPatch: UserPatch;
+  slotSelectionConfirmed: boolean;
+  patchLoaded: boolean;
+  readStatus: string;
   dirtyCount: number;
+  patchName: string;
+  patchNameDirty: boolean;
+  patchSlots: Record<number, PatchSlotRecord>;
   onSelectPatch: (patch: UserPatch) => void;
+  onReadPatch: () => void;
+  onSavePatch: () => void;
+  onClearSelectedPatch: () => void;
+  onExportMappedPatch: () => void;
+  onOpenImport: () => void;
 }) {
   const [query, setQuery] = useState("");
-  const [bankFilter, setBankFilter] = useState(Math.max(1, selectedPatch.bank - 2));
+  const [bankFilter, setBankFilter] = useState("all");
+  const normalizedQuery = query.trim().toLowerCase();
   const visible = USER_PATCHES.filter((patch) => {
-    const inBankWindow = patch.bank >= bankFilter && patch.bank < bankFilter + 12;
-    if (!query.trim()) {
-      return inBankWindow;
+    const inBank = bankFilter === "all" || patch.bank === Number(bankFilter);
+    if (!inBank) {
+      return false;
     }
-    return `USER ${patch.label}`.toLowerCase().includes(query.trim().toLowerCase());
-  }).slice(0, 72);
+    if (!normalizedQuery) {
+      return true;
+    }
+    const cachedName = patchSlots[patch.userIndex]?.name ?? "";
+    return `USER ${patch.label} ${cachedName}`.toLowerCase().includes(normalizedQuery);
+  });
 
   return (
     <section className="sidebar-section" aria-labelledby="patch-library-title">
-      <SectionHeader id="patch-library-title" title="Patch Library" icon={<ListMagnifyingGlass size={16} aria-hidden="true" />} />
+      <SectionHeader id="patch-library-title" title="Patch Manager" icon={<ListMagnifyingGlass size={16} aria-hidden="true" />} aside={`${visible.length}/297`} />
 
       <div className="search-field">
         <MagnifyingGlass size={15} aria-hidden="true" />
@@ -1626,44 +2457,85 @@ function PatchLibrary({
         />
       </div>
 
-      <div className={`library-current ${dirtyCount ? "is-dirty" : ""}`}>
-        <span>Current patch</span>
+      <div className={`library-current ${dirtyCount ? "is-dirty" : ""} ${patchLoaded ? "is-loaded" : "is-unread"}`}>
+        <span>{slotSelectionConfirmed ? "Selected USER slot" : "No USER slot selected"}</span>
         <strong>
-          USER {selectedPatch.label}
-          {dirtyCount ? <em>{dirtyCount} unsaved</em> : null}
+          {slotSelectionConfirmed ? `USER ${selectedPatch.label}${patchName ? ` - ${patchName}` : ""}` : "Choose a slot below"}
+          {slotSelectionConfirmed && dirtyCount ? <em>{dirtyCount} unsaved</em> : null}
         </strong>
-        <small>Bank MSB {selectedPatch.bankMsb}, PC {selectedPatch.program}</small>
+        <small>
+          {slotSelectionConfirmed
+            ? `Bank MSB ${selectedPatch.bankMsb}, PC ${selectedPatch.program}`
+            : "The app has not sent Bank Select / Program Change yet."}
+        </small>
+        <small>
+          {slotSelectionConfirmed
+            ? patchLoaded
+              ? patchNameDirty
+                ? "Patch name rename is staged."
+                : "Mapped DT1 responses have updated the editor."
+              : "Selection only. Patch contents have not been read yet."
+            : "Select a slot before reading, exporting, saving, importing into, or clearing a USER slot."}
+        </small>
+        <small>{readStatus}</small>
       </div>
 
-      <Field label={`Banks ${bankFilter}-${Math.min(bankFilter + 11, 99)}`}>
-        <input
-          type="range"
-          min={1}
-          max={88}
-          step={1}
-          value={bankFilter}
-          onChange={(event) => setBankFilter(Number(event.target.value))}
-        />
+      <div className="librarian-actions">
+        {!slotSelectionConfirmed ? (
+          <button type="button" className="primary" disabled>Select a slot below</button>
+        ) : !patchLoaded ? (
+          <button type="button" className="primary" onClick={onReadPatch}>Read selected</button>
+        ) : dirtyCount ? (
+          <button type="button" className="primary" onClick={onSavePatch}>Save to selected</button>
+        ) : (
+          <button type="button" className="primary" onClick={onReadPatch}>Read again</button>
+        )}
+        <button type="button" onClick={onExportMappedPatch}>Export mapped patch</button>
+        <button type="button" onClick={onOpenImport}>Import SysEx</button>
+        <button type="button" className="danger" onClick={onClearSelectedPatch}>Clear selected</button>
+      </div>
+
+      <Field label="Bank filter">
+        <select value={bankFilter} onChange={(event) => setBankFilter(event.target.value)}>
+          <option value="all">All USER banks</option>
+          {Array.from({ length: 99 }, (_, index) => index + 1).map((bank) => (
+            <option key={bank} value={bank}>
+              USER {bank.toString().padStart(2, "0")}
+            </option>
+          ))}
+        </select>
       </Field>
 
-      <div className="patch-list" role="list" aria-label="Visible GR-55 USER patches">
+      <div className="patch-list" role="listbox" aria-label="GR-55 USER patches">
         {visible.length === 0 ? (
           <p className="empty-state">No matching USER patches.</p>
         ) : (
           visible.map((patch) => (
+            (() => {
+              const slot = patchSlots[patch.userIndex];
+              const selected = slotSelectionConfirmed && patch.userIndex === selectedPatch.userIndex;
+              const state = selected && dirtyCount ? "dirty" : slot?.status ?? (selected && !patchLoaded ? "reading" : "unread");
+              const name = selected && patchName ? patchName : slot?.name;
+              return (
             <button
               type="button"
               key={patch.userIndex}
-              className={`${patch.userIndex === selectedPatch.userIndex ? "is-selected" : ""} ${patch.userIndex === selectedPatch.userIndex && dirtyCount ? "is-dirty" : ""}`}
+              className={`${selected ? "is-selected" : ""} ${state === "dirty" ? "is-dirty" : ""} ${
+                state === "saved" ? "is-saved" : state === "error" ? "is-error" : ""
+              }`}
               onClick={() => onSelectPatch(patch)}
-              aria-pressed={patch.userIndex === selectedPatch.userIndex}
+              role="option"
+              aria-selected={selected}
             >
               <span>
                 USER {patch.label}
-                {patch.userIndex === selectedPatch.userIndex && dirtyCount ? <em>Unsaved</em> : null}
+                {name ? <strong>{name}</strong> : null}
+                <em>{state}</em>
               </span>
               <small>PC {patch.program}</small>
             </button>
+              );
+            })()
           ))
         )}
       </div>
@@ -1677,12 +2549,14 @@ function QuickMonitor({
   bridgeStatus,
   usbStatus,
   midiStatus,
+  hardwareActivity,
 }: {
   mirrorStatus: string;
   lastLogEntry: ReturnType<typeof useMidi>["log"][number] | undefined;
   bridgeStatus: string;
   usbStatus: string;
   midiStatus: string;
+  hardwareActivity: HardwareActivity[];
 }) {
   return (
     <details className="sidebar-section monitor-disclosure">
@@ -1705,33 +2579,73 @@ function QuickMonitor({
         <span>Last sent command</span>
         <strong>{lastLogEntry?.direction === "out" ? lastLogEntry.label : "No outgoing MIDI yet"}</strong>
       </div>
+      <div className="hardware-activity-list" aria-label="Recent hardware activity">
+        {hardwareActivity.length ? (
+          hardwareActivity.slice(0, 4).map((activity) => (
+            <div key={activity.id}>
+              <span>{activity.at}</span>
+              <strong>{activity.label}</strong>
+              <small>{activity.detail}</small>
+            </div>
+          ))
+        ) : (
+          <p>No hardware input decoded yet.</p>
+        )}
+      </div>
     </details>
   );
 }
 
 function PatchIdentity({
   selectedPatch,
+  slotSelectionConfirmed,
   dirtyCount,
   operationState,
+  patchLoaded,
+  readStatus,
+  patchName,
+  patchNameDirty,
+  patchNameStatus,
+  patchNameError,
+  onPatchNameChange,
 }: {
   selectedPatch: UserPatch;
+  slotSelectionConfirmed: boolean;
   dirtyCount: number;
   operationState: OperationState;
+  patchLoaded: boolean;
+  readStatus: string;
+  patchName: string;
+  patchNameDirty: boolean;
+  patchNameStatus: PatchSlotState;
+  patchNameError: string;
+  onPatchNameChange: (name: string) => void;
 }) {
   return (
     <section className="patch-identity" aria-labelledby="patch-identity-title">
       <div className="patch-title-group">
-        <span>Current patch</span>
-        <h1 id="patch-identity-title">USER {selectedPatch.label}</h1>
-        <p>Bank MSB {selectedPatch.bankMsb}, LSB 0, PC {selectedPatch.program}</p>
+        <span>{slotSelectionConfirmed ? (patchLoaded ? "Mapped values received" : "Selected slot") : "Select a USER slot"}</span>
+        <h1 id="patch-identity-title">{slotSelectionConfirmed ? `USER ${selectedPatch.label}` : "No USER slot selected"}</h1>
+        <p>{readStatus}</p>
       </div>
       <div className="patch-name-block">
         <label htmlFor="patch-name">Patch name</label>
-        <input id="patch-name" value="Controlled Feedback Lead" readOnly aria-readonly="true" />
+        <input
+          id="patch-name"
+          value={patchName}
+          maxLength={16}
+          disabled={!slotSelectionConfirmed || !patchLoaded}
+          aria-invalid={Boolean(patchNameError)}
+          aria-describedby="patch-name-help"
+          onChange={(event) => onPatchNameChange(event.target.value)}
+        />
+        <small id="patch-name-help">
+          {patchNameError || (patchNameDirty ? "Staged rename. Use Preview to send temporary memory, Save to commit." : `Patch name ${patchNameStatus}.`)}
+        </small>
       </div>
       <div className="patch-save-state">
-        {dirtyCount ? <WarningCircle size={17} aria-hidden="true" /> : <CheckCircle size={17} aria-hidden="true" />}
-        <span>{dirtyCount ? `${dirtyCount} unsaved changes` : operationState === "saved" ? "Saved to GR-55" : "No unsaved changes"}</span>
+        {patchLoaded && !dirtyCount ? <CheckCircle size={17} aria-hidden="true" /> : <WarningCircle size={17} aria-hidden="true" />}
+        <span>{!patchLoaded ? "Read required" : dirtyCount ? `${dirtyCount} staged changes` : operationState === "saved" ? "Read-back verified" : "No staged changes"}</span>
       </div>
     </section>
   );
@@ -1757,25 +2671,26 @@ function IntentPatchMap({
       <div className="patch-map-heading">
         <div>
           <h2 id="patch-map-title">Patch map</h2>
-          <p>Click the part of the sound you want to change.</p>
+          <p>Sources and effects shown here are backed by mapped temporary-patch parameters; fixture-only badges mean write behavior has not been individually hardware-verified.</p>
         </div>
-        <span>{sources.filter((source) => source.enabled).length} active sources</span>
+        <span>{MODULES.flatMap((module) => module.parameters).length} mapped controls</span>
       </div>
       <div className="patch-map">
         <div className="patch-map-sources" aria-label="Sound sources">
           {sources.map((source) => {
             const selected = selection.type === "source" && selection.sourceId === source.id;
+            const active = sourceIsOn(source, values);
             return (
               <button
                 key={source.id}
                 type="button"
-                className={`patch-source-node ${source.enabled ? "is-active" : "is-muted"} ${selected ? "is-selected" : ""}`}
+                className={`patch-source-node ${active ? "is-active" : "is-muted"} ${selected ? "is-selected" : ""}`}
                 onClick={() => onSelectSource(source.id)}
                 aria-pressed={selected}
               >
                 <span>{source.block}</span>
-                <strong>{source.tone}</strong>
-                <small>{sourceRoleLabel(source)}</small>
+                <strong>{sourceSummary(source, values)}</strong>
+                <small>{active ? "mapped source" : "off"}</small>
               </button>
             );
           })}
@@ -1807,12 +2722,16 @@ function IntentPatchMap({
 
 function SourceMixer({
   sources,
+  values,
+  originalValues,
   selection,
   hud,
   onChange,
   onInspect,
 }: {
   sources: SourceDefinition[];
+  values: ParameterValues;
+  originalValues: ParameterValues;
   selection: Selection;
   hud: InteractionHud | null;
   onChange: (sourceId: string, field: SourceField, value: boolean | number | string) => void;
@@ -1820,55 +2739,120 @@ function SourceMixer({
 }) {
   return (
     <section className="source-mixer" aria-labelledby="source-mixer-title">
-      <SectionHeader id="source-mixer-title" title="What is making sound" icon={<FadersHorizontal size={16} aria-hidden="true" />} />
+      <SectionHeader id="source-mixer-title" title="Sound sources" icon={<FadersHorizontal size={16} aria-hidden="true" />} />
+      <p className="mapping-note">PCM, modeling and normal pickup controls below are wired to temporary-patch SysEx addresses. USER 73-3 read verification passed; fixture-only badges mark controls that still need individual write verification.</p>
       <div className="source-grid">
         {sources.map((source) => {
           const sourceSelected = selection.type === "source" && selection.sourceId === source.id;
+          const enabled = sourceIsOn(source, values);
+          const keyFields = sourceFields(source).filter(({ field }) => ["enabled", "tone", "routing", "level", "pan"].includes(field)).slice(0, 4);
           return (
-          <article key={source.id} className={`source-strip ${source.enabled ? "is-enabled" : "is-disabled"} ${sourceSelected ? "is-selected" : ""}`}>
-            <div className="source-enable">
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={source.enabled}
-                  onChange={(event) => onChange(source.id, "enabled", event.target.checked)}
-                  aria-label={`${source.label} on or off`}
-                />
-                <span />
-              </label>
-            </div>
-
-            <div className="source-strip-header">
-              <div>
-                <strong>{source.label}</strong>
-                <span>{source.tone}</span>
+            <article key={source.id} className={`source-strip ${enabled ? "is-enabled" : "is-disabled"} ${sourceSelected ? "is-selected" : ""}`}>
+              <div className="source-strip-header">
+                <div>
+                  <strong>{source.label}</strong>
+                  <span>{sourceSummary(source, values)}</span>
+                </div>
+                <button type="button" className="source-edit-button" onClick={() => onInspect(source.id, source.primaryField)}>
+                  Edit
+                </button>
               </div>
-            </div>
-
-            <div className="source-role">
-              <span>{source.role}</span>
-              <small>{source.enabled ? "in patch" : "hidden"}</small>
-            </div>
-
-            <SourceSlider
-              label="Level"
-              value={source.level}
-              min={0}
-              max={100}
-              unit="%"
-              selected={selection.type === "source" && selection.sourceId === source.id && selection.field === "level"}
-              hud={hud}
-              onChange={(value) => onChange(source.id, "level", value)}
-            />
-
-            <button type="button" className="source-edit-button" onClick={() => onInspect(source.id, "level")}>
-              Edit
-            </button>
-          </article>
+              <div className="source-role">
+                <span>{source.role}</span>
+                <small>{enabled ? "in patch" : "off"}</small>
+              </div>
+              <div className="source-param-stack">
+                {keyFields.map(({ field, param }) => (
+                  <SourceMappedControl
+                    key={field}
+                    source={source}
+                    field={field}
+                    param={param}
+                    value={values[param.id] ?? param.defaultValue}
+                    originalValue={originalValues[param.id] ?? param.defaultValue}
+                    selected={selection.type === "source" && selection.sourceId === source.id && selection.field === field}
+                    hud={hud}
+                    onChange={onChange}
+                    onInspect={onInspect}
+                  />
+                ))}
+              </div>
+            </article>
           );
         })}
       </div>
     </section>
+  );
+}
+
+function SourceMappedControl({
+  source,
+  field,
+  param,
+  value,
+  originalValue,
+  selected,
+  hud,
+  onChange,
+  onInspect,
+}: {
+  source: SourceDefinition;
+  field: SourceField;
+  param: ParameterDefinition;
+  value: number;
+  originalValue: number;
+  selected: boolean;
+  hud: InteractionHud | null;
+  onChange: (sourceId: string, field: SourceField, value: boolean | number | string) => void;
+  onInspect: (sourceId: string, field?: SourceField) => void;
+}) {
+  const dirty = value !== originalValue;
+
+  let control: React.ReactNode;
+  if (param.kind === "toggle") {
+    const checked = value > 0;
+    control = (
+      <button type="button" className={`toggle-button ${checked ? "is-on" : ""}`} onClick={() => onChange(source.id, field, checked ? 0 : 1)} aria-pressed={checked}>
+        <span aria-hidden="true" />
+        {checked ? "ON" : "OFF"}
+      </button>
+    );
+  } else if (param.kind === "select") {
+    control = (
+      <select value={value} onChange={(event) => onChange(source.id, field, Number(event.target.value))} onFocus={() => onInspect(source.id, field)} aria-label={`${source.label} ${sourceFieldLabel(field)}`}>
+        {param.options?.map((option, index) => (
+          <option key={option} value={index}>{option}</option>
+        ))}
+      </select>
+    );
+  } else {
+    control = (
+      <div className="slider-row">
+        <input
+          type="range"
+          min={param.min}
+          max={param.max}
+          step={param.step}
+          value={value}
+          aria-label={`${source.label} ${sourceFieldLabel(field)}`}
+          onFocus={() => onInspect(source.id, field)}
+          onChange={(event) => onChange(source.id, field, Number(event.target.value))}
+        />
+        <output>{formatParameterValue(param, value)}</output>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`compact-slider ${selected ? "is-selected" : ""} ${dirty ? "is-dirty" : ""}`}>
+      <div className="slider-label-row">
+        <span>{sourceFieldLabel(field)}</span>
+        {dirty ? <em className="dirty-badge">Staged</em> : null}
+      </div>
+      {control}
+      <small>{param.hardwareVerificationStatus === "verified" ? "verified" : "fixture-only"}</small>
+      {selected && hud ? <ValueHud hud={hud} /> : null}
+    </div>
   );
 }
 
@@ -1880,6 +2864,7 @@ function SourceSlider({
   unit,
   selected,
   hud,
+  disabled = false,
   onChange,
 }: {
   label: string;
@@ -1889,6 +2874,7 @@ function SourceSlider({
   unit: string;
   selected: boolean;
   hud: InteractionHud | null;
+  disabled?: boolean;
   onChange: (value: number) => void;
 }) {
   return (
@@ -1903,6 +2889,7 @@ function SourceSlider({
           min={min}
           max={max}
           value={value}
+          disabled={disabled}
           aria-label={`${label}, ${value}${unit}`}
           onChange={(event) => onChange(Number(event.target.value))}
         />
@@ -1952,15 +2939,27 @@ function FocusedSoundEditor({
   onExportModule: () => void;
 }) {
   if (selectedSource) {
-    return (
-      <FocusedSourceEditor
-        source={selectedSource}
-        selection={selection}
-        hud={hud}
-        onChange={onSourceChange}
-        onIntent={onSourceIntent}
-      />
-    );
+    const sourceModule = MODULES.find((module) => module.id === selectedSource.moduleId);
+    if (sourceModule) {
+      return (
+        <FocusedModuleEditor
+          module={sourceModule}
+          values={values}
+          originalValues={originalValues}
+          selectedParameterId={selectedParameterId}
+          hud={hud}
+          liveWrite={liveWrite}
+          lastSentByParameter={lastSentByParameter}
+          onChange={onModuleChange}
+          onIntent={onModuleIntent}
+          onRevert={onRevertParameter}
+          onSendModule={onSendModule}
+          onReadModule={onReadModule}
+          onCopyModule={onCopyModule}
+          onExportModule={onExportModule}
+        />
+      );
+    }
   }
 
   if (selectedModule) {
@@ -1991,123 +2990,6 @@ function FocusedSoundEditor({
         <h2 id="focused-editor-title">Click a source or effect block</h2>
         <p>Start with the part of the sound you can hear: the pad, modeled guitar, amp body, repeats, room, or final tone.</p>
       </div>
-    </section>
-  );
-}
-
-function FocusedSourceEditor({
-  source,
-  selection,
-  hud,
-  onChange,
-  onIntent,
-}: {
-  source: SourceDefinition;
-  selection: Selection;
-  hud: InteractionHud | null;
-  onChange: (sourceId: string, field: SourceField, value: boolean | number | string) => void;
-  onIntent: (sourceId: string, intent: SourceIntent) => void;
-}) {
-  return (
-    <section className="focused-editor" aria-labelledby="focused-source-title">
-      <FocusedHeader
-        headingId="focused-source-title"
-        eyebrow={source.block}
-        title={source.label}
-        detail={`${source.tone} - ${sourceRoleLabel(source)}`}
-        enabled={source.enabled}
-      />
-      <div className="simple-editor-grid">
-        <Field label="Instrument">
-          <select value={source.tone} onChange={(event) => onChange(source.id, "tone", event.target.value)}>
-            {source.toneOptions.map((option) => (
-              <option key={option} value={option}>{option}</option>
-            ))}
-          </select>
-        </Field>
-        <SourceSlider
-          label="Volume"
-          value={source.level}
-          min={0}
-          max={100}
-          unit="%"
-          selected={selection.type === "source" && selection.sourceId === source.id && selection.field === "level"}
-          hud={hud}
-          onChange={(value) => onChange(source.id, "level", value)}
-        />
-        <SourceSlider
-          label="Attack"
-          value={source.attack}
-          min={0}
-          max={100}
-          unit="%"
-          selected={selection.type === "source" && selection.sourceId === source.id && selection.field === "attack"}
-          hud={hud}
-          onChange={(value) => onChange(source.id, "attack", value)}
-        />
-        <SourceSlider
-          label="Brightness"
-          value={source.brightness}
-          min={0}
-          max={100}
-          unit="%"
-          selected={selection.type === "source" && selection.sourceId === source.id && selection.field === "brightness"}
-          hud={hud}
-          onChange={(value) => onChange(source.id, "brightness", value)}
-        />
-        <SourceSlider
-          label="Octave"
-          value={source.octave}
-          min={-2}
-          max={2}
-          unit=""
-          selected={selection.type === "source" && selection.sourceId === source.id && selection.field === "octave"}
-          hud={hud}
-          onChange={(value) => onChange(source.id, "octave", value)}
-        />
-        <SourceSlider
-          label="Send to effects"
-          value={source.fxSend}
-          min={0}
-          max={100}
-          unit="%"
-          selected={selection.type === "source" && selection.sourceId === source.id && selection.field === "fxSend"}
-          hud={hud}
-          onChange={(value) => onChange(source.id, "fxSend", value)}
-        />
-      </div>
-      <div className="intent-button-row" aria-label={`${source.label} quick edits`}>
-        <button type="button" onClick={() => onIntent(source.id, "darker")}>Darker</button>
-        <button type="button" onClick={() => onIntent(source.id, "brighter")}>Brighter</button>
-        <button type="button" onClick={() => onIntent(source.id, "back")}>Move back</button>
-        <button type="button" onClick={() => onIntent(source.id, "forward")}>Bring forward</button>
-        <button type="button" onClick={() => onIntent(source.id, "more-space")}>Add space</button>
-      </div>
-      <details className="advanced-editor">
-        <summary>Advanced source details</summary>
-        <div className="simple-editor-grid">
-          <SourceSlider
-            label="Pan"
-            value={source.pan}
-            min={-50}
-            max={50}
-            unit=""
-            selected={selection.type === "source" && selection.sourceId === source.id && selection.field === "pan"}
-            hud={hud}
-            onChange={(value) => onChange(source.id, "pan", value)}
-          />
-          <label className="toggle-row compact-toggle-row">
-            <input type="checkbox" checked={source.muted} onChange={(event) => onChange(source.id, "muted", event.target.checked)} />
-            <span>Mute this source</span>
-            <small>Staged source state</small>
-          </label>
-          <label className="toggle-row compact-toggle-row">
-            <input type="checkbox" checked={source.solo} onChange={(event) => onChange(source.id, "solo", event.target.checked)} />
-            <span>Solo this source</span>
-            <small>Staged source state</small>
-          </label>
-        </div>
-      </details>
     </section>
   );
 }
@@ -2170,13 +3052,6 @@ function FocusedModuleEditor({
           />
         ))}
       </div>
-      <div className="intent-button-row" aria-label={`${module.title} quick edits`}>
-        {moduleIntentButtons(module).map((button) => (
-          <button key={button.intent} type="button" onClick={() => onIntent(module.id, button.intent)}>
-            {button.label}
-          </button>
-        ))}
-      </div>
       <details className="advanced-editor">
         <summary>Advanced GR-55 parameters</summary>
         <ModuleEditor
@@ -2205,13 +3080,16 @@ function FocusedHeader({
   title,
   detail,
   enabled,
+  statusLabel,
 }: {
   headingId: string;
   eyebrow: string;
   title: string;
   detail: string;
   enabled: boolean;
+  statusLabel?: string;
 }) {
+  const label = statusLabel ?? (enabled ? "On" : "Off");
   return (
     <div className="focused-header">
       <div>
@@ -2219,7 +3097,7 @@ function FocusedHeader({
         <h2 id={headingId}>{title}</h2>
         <p>{detail}</p>
       </div>
-      <strong className={enabled ? "is-on" : "is-off"}>{enabled ? "On" : "Off"}</strong>
+      <strong className={enabled ? "is-on" : "is-off"}>{label}</strong>
     </div>
   );
 }
@@ -2669,20 +3547,25 @@ function SpecialTabPanel({
       <section className="module-editor special-panel" aria-labelledby="pedal-panel-title">
         <div className="module-header">
           <div>
-            <span>Performance</span>
+            <span>{tabId === "pedal" ? "Mapped CC" : "Not implemented"}</span>
             <h2 id="pedal-panel-title">Pedal, GK and assigns</h2>
           </div>
           <button type="button" onClick={onReadModule}>Read current module</button>
         </div>
         <PerformancePanel controls={controls} values={performanceValues} onChange={onPerformanceChange} />
-        <div className="assignment-table">
-          {["GK S1", "GK S2", "EXP switch", "CTL pedal", "Assign 1-8"].map((label) => (
-            <div key={label}>
-              <strong>{label}</strong>
-              <span>Target mapping appears here when the GR-55 assign block is read.</span>
+        {tabId === "assigns" ? (
+          <>
+            <p className="mapping-note">Assign target bytes are not mapped yet. The rows below are placeholders only.</p>
+            <div className="assignment-table">
+              {["GK S1", "GK S2", "EXP switch", "CTL pedal", "Assign 1-8"].map((label) => (
+                <div key={label}>
+                  <strong>{label}</strong>
+                  <span>Not implemented yet. No SysEx mapping is wired.</span>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          </>
+        ) : null}
       </section>
     );
   }
@@ -2692,20 +3575,25 @@ function SpecialTabPanel({
       <section className="module-editor special-panel" aria-labelledby="tones-panel-title">
         <div className="module-header">
           <div>
-            <span>Sources</span>
+            <span>Mapped source blocks</span>
             <h2 id="tones-panel-title">Tones and pickup sources</h2>
           </div>
         </div>
+        <p className="mapping-note">This table is generated from the same parameter registry used for read/write/export. Fixture-only means the address is mapped from reference material but still needs USER 73-3 hardware verification.</p>
         <div className="source-summary-table">
-          {sources.map((source) => (
-            <div key={source.id}>
-              <strong>{source.label}</strong>
-              <span>{source.enabled ? "On" : "Off"}</span>
-              <span>{source.tone}</span>
-              <span>{source.level}%</span>
-              <span>{source.pan}</span>
-            </div>
-          ))}
+          {sources.map((source) => {
+            const levelParam = sourceFieldParam(source, "level");
+            const panParam = sourceFieldParam(source, "pan");
+            return (
+              <div key={source.id}>
+                <strong>{source.label}</strong>
+                <span>{sourceIsOn(source, values) ? "On" : "Off"}</span>
+                <span>{sourceSummary(source, values)}</span>
+                <span>{levelParam ? formatParameterValue(levelParam, values[levelParam.id]) : "unmapped"}</span>
+                <span>{panParam ? formatParameterValue(panParam, values[panParam.id]) : "unmapped"}</span>
+              </div>
+            );
+          })}
         </div>
       </section>
     );
@@ -2736,7 +3624,7 @@ function SpecialTabPanel({
       </div>
       <div className="overview-grid">
         <OverviewTile label="Patch" value={`USER ${selectedPatch.label}`} detail={`MSB ${selectedPatch.bankMsb}, PC ${selectedPatch.program}`} />
-        <OverviewTile label="Patch level" value={formatPlainValue(values.patchLevel, "%")} detail="Temporary patch level" />
+        <OverviewTile label="Patch level" value={formatPlainValue(values.patchLevel, "%")} detail="Mapped temporary parameter" />
         <OverviewTile label="AMP" value={values.ampSwitch ? "On" : "Off"} detail="Modeled amp block" />
         <OverviewTile label="MFX" value={values.mfxSwitch ? "On" : "Off"} detail="Multi effect block" />
         <OverviewTile label="Delay" value={values.delaySwitch ? "On" : "Off"} detail="Delay send block" />
@@ -2826,7 +3714,7 @@ function HardwareActions({
     <section className="inspector-section" aria-labelledby="hardware-actions-title">
       <SectionHeader id="hardware-actions-title" title="Hardware Actions" icon={<Circuitry size={16} aria-hidden="true" />} />
       <div className="action-list">
-        <InspectorAction title="Read temporary patch" detail="Request temporary patch level block" onClick={onRequestPatch} />
+        <InspectorAction title="Read mapped patch" detail="Request every mapped parameter" onClick={onRequestPatch} />
         <InspectorAction title="Send visible parameters" detail={`Push ${selectedModule.shortTitle} to temporary memory`} onClick={onSendModule} />
         <InspectorAction title={`Save to USER ${selectedPatch.label}`} detail={`Overwrite target slot with ${dirtyCount} pending changes`} onClick={onSaveToSlot} primary />
         <InspectorAction title="Mute temporary patch" detail="Turn off main effect blocks in temp memory" onClick={onClearTemporaryPatch} />
@@ -2863,9 +3751,19 @@ function InspectorAction({
   );
 }
 
-function InspectorIntentAction({ title, detail, onClick }: { title: string; detail: string; onClick: () => void }) {
+function InspectorIntentAction({
+  title,
+  detail,
+  disabled,
+  onClick,
+}: {
+  title: string;
+  detail: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
   return (
-    <button type="button" className="inspector-intent-action" onClick={onClick}>
+    <button type="button" className="inspector-intent-action" disabled={disabled} onClick={onClick}>
       <strong>{title}</strong>
       <span>{detail}</span>
     </button>
@@ -2912,9 +3810,10 @@ function SelectionInspector({
   onModuleIntent: (moduleId: ParameterModuleId, intent: ModuleIntent) => void;
 }) {
   const parameterDirty = selectedParameter ? values[selectedParameter.id] !== originalValues[selectedParameter.id] : false;
-  const sourceOriginalValue =
-    selectedSource && sourceField ? SOURCE_DEFAULTS.find((source) => source.id === selectedSource.id)?.[sourceField] : undefined;
-  const sourceDirty = Boolean(selectedSource && sourceField && selectedSource[sourceField] !== sourceOriginalValue);
+  const sourceParam = selectedSource && sourceField ? sourceFieldParam(selectedSource, sourceField) : null;
+  const sourceCurrentValue = sourceParam ? values[sourceParam.id] ?? sourceParam.defaultValue : undefined;
+  const sourceOriginalValue = sourceParam ? originalValues[sourceParam.id] ?? sourceParam.defaultValue : undefined;
+  const sourceDirty = Boolean(sourceParam && sourceCurrentValue !== sourceOriginalValue);
   return (
     <section className="inspector-section" aria-labelledby="selection-inspector-title">
       <SectionHeader id="selection-inspector-title" title={selection.type === "patch" ? "Next Action" : "Selection Inspector"} icon={<Sliders size={16} aria-hidden="true" />} />
@@ -2934,7 +3833,7 @@ function SelectionInspector({
             <InspectorRow label="Current value" value={formatParameterValue(selectedParameter, values[selectedParameter.id])} />
             <InspectorRow label="Before / after" value={parameterDirty ? `${formatParameterValue(selectedParameter, originalValues[selectedParameter.id])} to ${formatParameterValue(selectedParameter, values[selectedParameter.id])}` : "Unchanged"} />
             <InspectorRow label="Range / unit" value={formatParameterRange(selectedParameter)} />
-            <InspectorRow label="Send behavior" value={liveWrite ? "Live Preview sends while editing" : "Staged until Send Preview"} />
+            <InspectorRow label="Send behavior" value={liveWrite ? "Live Preview sends while editing" : "Staged until Send Staged"} />
             <InspectorRow label="Save behavior" value={`Save writes USER ${selectedPatch.label}.`} />
           </dl>
           <details className="inspector-advanced">
@@ -2950,49 +3849,45 @@ function SelectionInspector({
         <>
           <div className="inspector-explain">
             <strong>{selectedSource.label}</strong>
-            <p>{sourceInspectorDetail(selectedSource, sourceField)}</p>
-            <p>{liveWrite ? "Live Preview is on where this source control is mapped." : "This source edit is staged until Send Preview."}</p>
-            <button type="button" disabled={!sourceDirty} onClick={() => onRevertSource(selectedSource.id, sourceField)}>
+            <p>{sourceParam ? parameterSoundImpact(sourceParam) : `${sourceFieldLabel(sourceField)} is not mapped yet for this source.`}</p>
+            <p>{sourceParam ? parameterInspectorDetail(sourceParam, liveWrite) : "No MIDI/SysEx is sent for unmapped source fields."}</p>
+            <button type="button" disabled={!sourceDirty || !sourceParam} onClick={() => onRevertSource(selectedSource.id, sourceField)}>
               <ArrowCounterClockwise size={15} aria-hidden="true" />
               Revert
             </button>
           </div>
-          <div className="intent-action-list" aria-label={`${selectedSource.label} intent actions`}>
-            <InspectorIntentAction title="Change instrument" detail="Cycle to the next tone/model option" onClick={() => onSourceIntent(selectedSource.id, "change-instrument")} />
-            <InspectorIntentAction title="Make it darker" detail="Lower brightness/filter amount" onClick={() => onSourceIntent(selectedSource.id, "darker")} />
-            <InspectorIntentAction title="Make it brighter" detail="Raise brightness/filter amount" onClick={() => onSourceIntent(selectedSource.id, "brighter")} />
-            <InspectorIntentAction title="Move it back" detail="Lower level and add more effects send" onClick={() => onSourceIntent(selectedSource.id, "back")} />
-            <InspectorIntentAction title="Add space" detail="Send more of this source into effects" onClick={() => onSourceIntent(selectedSource.id, "more-space")} />
-          </div>
           <dl className="inspector-dl">
             <InspectorRow label="Block" value={selectedSource.block} />
-            <InspectorRow label="Current value" value={formatSourceValue(sourceField, selectedSource[sourceField])} />
-            <InspectorRow label="Before / after" value={sourceDirty ? `${formatSourceValue(sourceField, sourceOriginalValue ?? "")} to ${formatSourceValue(sourceField, selectedSource[sourceField])}` : "Unchanged"} />
-            <InspectorRow label="Range / unit" value={sourceFieldRange(sourceField)} />
-            <InspectorRow label="Send behavior" value={liveWrite ? "Live Preview where source address is mapped" : "Staged until Send Preview"} />
-            <InspectorRow label="Save behavior" value="Requires GR-55 source address map before write" />
+            <InspectorRow label="Field" value={sourceFieldLabel(sourceField)} />
+            <InspectorRow label="Current value" value={sourceParam ? formatParameterValue(sourceParam, sourceCurrentValue ?? sourceParam.defaultValue) : "unmapped"} />
+            <InspectorRow label="Before / after" value={sourceParam && sourceDirty ? `${formatParameterValue(sourceParam, sourceOriginalValue ?? sourceParam.defaultValue)} to ${formatParameterValue(sourceParam, sourceCurrentValue ?? sourceParam.defaultValue)}` : "Unchanged"} />
+            <InspectorRow label="Range / unit" value={sourceParam ? formatParameterRange(sourceParam) : "unmapped"} />
+            <InspectorRow label="Verification" value={sourceParam?.hardwareVerificationStatus ?? "unmapped"} />
+            <InspectorRow label="Send behavior" value={sourceParam ? (liveWrite ? "Live Preview sends temporary DT1 while editing" : "Staged until Send Staged") : "Unmapped. No MIDI/SysEx is sent."} />
+            <InspectorRow label="Save behavior" value={sourceParam ? `Included in save/read-back workflow for USER ${selectedPatch.label}.` : "Not saved. Requires a confirmed GR-55 source address map."} />
           </dl>
+          {sourceParam ? (
+            <details className="inspector-advanced">
+              <summary>Advanced SysEx</summary>
+              <dl className="inspector-dl">
+                <InspectorRow label="Address" value={toHex(sourceParam.address)} code />
+                <InspectorRow label="Data size" value={parameterDataSizeLabel(sourceParam)} />
+                <InspectorRow label="Parser" value={sourceParam.parser} />
+                <InspectorRow label="Source" value={sourceParam.source ?? "local registry"} />
+              </dl>
+            </details>
+          ) : null}
         </>
       ) : selectedModule ? (
         <>
           <div className="inspector-explain">
             <strong>{selectedModule.title}</strong>
             <p>{moduleIntentSummary(selectedModule)}</p>
-            <p>{liveWrite ? "Simple controls send mapped GR-55 parameters while you move them." : "Simple controls are staged until Send Preview."}</p>
+            <p>{liveWrite ? "Simple controls send mapped GR-55 parameters while you move them." : "Simple controls are staged until Send Staged."}</p>
             <button type="button" onClick={() => onModuleIntent(selectedModule.id, "reset")}>
               <ArrowCounterClockwise size={15} aria-hidden="true" />
               Revert block
             </button>
-          </div>
-          <div className="intent-action-list" aria-label={`${selectedModule.title} intent actions`}>
-            {moduleIntentButtons(selectedModule).map((button) => (
-              <InspectorIntentAction
-                key={button.intent}
-                title={button.label}
-                detail={button.detail}
-                onClick={() => onModuleIntent(selectedModule.id, button.intent)}
-              />
-            ))}
           </div>
           <dl className="inspector-dl">
             <InspectorRow label="Block" value={selectedModule.shortTitle} />
@@ -3010,7 +3905,7 @@ function SelectionInspector({
           <dl>
             <div>
               <dt>Patch</dt>
-              <dd>{patchLoaded ? `USER ${selectedPatch.label} loaded` : "Not loaded"}</dd>
+              <dd>{patchLoaded ? `USER ${selectedPatch.label} mapped values received` : "Not loaded"}</dd>
             </div>
             <div>
               <dt>Edit</dt>
@@ -3018,7 +3913,7 @@ function SelectionInspector({
             </div>
             <div>
               <dt>Preview</dt>
-              <dd>{liveWrite ? "Live Preview is available" : "Staged edits use Send Preview"}</dd>
+              <dd>{liveWrite ? "Live Preview is available" : "Staged edits use Send Staged"}</dd>
             </div>
             <div>
               <dt>Save</dt>
@@ -3043,11 +3938,13 @@ function UtilityDrawer({
   onImportRaw,
   onPasteClipboard,
   messages,
+  queueClassification,
   libraryError,
   onLibraryError,
   onAddMessages,
   onSendMessage,
   onSendQueue,
+  onSendQueueToPatch,
   onDeleteMessage,
   onClearQueue,
   onExportQueue,
@@ -3062,11 +3959,13 @@ function UtilityDrawer({
   onImportRaw: () => void;
   onPasteClipboard: () => void;
   messages: ImportedSysExMessage[];
+  queueClassification: SysExQueueClassification;
   libraryError: string;
   onLibraryError: (value: string) => void;
   onAddMessages: (messages: ImportedSysExMessage[]) => void;
   onSendMessage: (message: ImportedSysExMessage) => void;
   onSendQueue: () => void;
+  onSendQueueToPatch: () => void;
   onDeleteMessage: (index: number) => void;
   onClearQueue: () => void;
   onExportQueue: () => void;
@@ -3088,11 +3987,13 @@ function UtilityDrawer({
         />
         <SysExLibrary
           messages={messages}
+          queueClassification={queueClassification}
           error={libraryError}
           onError={onLibraryError}
           onAddMessages={onAddMessages}
           onSendMessage={onSendMessage}
           onSendQueue={onSendQueue}
+          onSendQueueToPatch={onSendQueueToPatch}
           onDeleteMessage={onDeleteMessage}
           onClearQueue={onClearQueue}
           onExportQueue={onExportQueue}
@@ -3146,21 +4047,25 @@ function SysExConsole({
 
 function SysExLibrary({
   messages,
+  queueClassification,
   error,
   onError,
   onAddMessages,
   onSendMessage,
   onSendQueue,
+  onSendQueueToPatch,
   onDeleteMessage,
   onClearQueue,
   onExportQueue,
 }: {
   messages: ImportedSysExMessage[];
+  queueClassification: SysExQueueClassification;
   error: string;
   onError: (value: string) => void;
   onAddMessages: (messages: ImportedSysExMessage[]) => void;
   onSendMessage: (message: ImportedSysExMessage) => void;
   onSendQueue: () => void;
+  onSendQueueToPatch: () => void;
   onDeleteMessage: (index: number) => void;
   onClearQueue: () => void;
   onExportQueue: () => void;
@@ -3203,7 +4108,7 @@ function SysExLibrary({
 
   return (
     <section className="inspector-section compact-section" aria-labelledby="sysex-library-title">
-      <SectionHeader id="sysex-library-title" title="SysEx Import Queue" icon={<FileArrowUp size={16} aria-hidden="true" />} aside={`${messages.length}`} />
+      <SectionHeader id="sysex-library-title" title="Raw SysEx Import Queue" icon={<FileArrowUp size={16} aria-hidden="true" />} aside={`${messages.length}`} />
       <input
         ref={fileInputRef}
         className="hidden-file-input"
@@ -3217,9 +4122,14 @@ function SysExLibrary({
           <UploadSimple size={16} aria-hidden="true" />
           Load file
         </button>
-        <button type="button" onClick={onSendQueue} disabled={!messages.length}>Send all</button>
-        <button type="button" onClick={onExportQueue} disabled={!messages.length}>Export</button>
+        <button type="button" onClick={onSendQueue} disabled={!messages.length}>Send to temp</button>
+        <button type="button" onClick={onSendQueueToPatch} disabled={!messages.length}>Temp then save</button>
+        <button type="button" onClick={onExportQueue} disabled={!messages.length}>Export raw queue</button>
         <button type="button" onClick={onClearQueue} disabled={!messages.length}>Clear</button>
+      </div>
+      <div className={`queue-classification queue-${queueClassification.kind}`}>
+        <strong>{queueClassification.label}</strong>
+        <span>{queueClassification.detail}</span>
       </div>
       {error ? <p className="inline-error" role="alert">{error}</p> : null}
       <div className="library-list">
@@ -3380,6 +4290,10 @@ function formatParameterValue(param: ParameterDefinition, value: number) {
     return param.options[current] ?? String(current);
   }
 
+  if (param.type === "toneNumber") {
+    return formatPcmToneNumber(current);
+  }
+
   if (param.unit === "dB") {
     return `${current > 0 ? "+" : ""}${current} dB`;
   }
@@ -3452,7 +4366,7 @@ function parameterSoundImpact(param: ParameterDefinition) {
 }
 
 function parameterInspectorDetail(param: ParameterDefinition, liveWrite: boolean) {
-  const previewMode = liveWrite ? "Live Preview sends the temporary patch value as you change it." : "Staged mode holds the value until Send Preview.";
+  const previewMode = liveWrite ? "Live Preview sends the temporary patch value as you change it." : "Staged mode holds the value until Send Staged.";
   if (param.kind === "toggle") {
     return `${previewMode} This switch changes whether the ${moduleTitle(param.moduleId)} block contributes to the patch sound.`;
   }
@@ -3468,52 +4382,36 @@ function parameterDataSizeLabel(param: ParameterDefinition) {
   return `${scalarSize} byte${scalarSize === 1 ? "" : "s"}`;
 }
 
-function sourceInspectorDetail(source: SourceDefinition, field: SourceField) {
-  if (field === "level") {
-    return `Balances ${source.label} against the other GR-55 sound sources before the effect chain.`;
-  }
-  if (field === "brightness") {
-    return `Makes ${source.label} darker or brighter before it feeds the shared effects.`;
-  }
-  if (field === "attack") {
-    return `Changes how quickly ${source.label} speaks at the front of the note.`;
-  }
-  if (field === "fxSend") {
-    return `Moves ${source.label} into chorus, delay and reverb without changing the dry level.`;
-  }
-  if (field === "octave") {
-    return `Moves ${source.label} up or down by octaves while keeping the role in the patch.`;
-  }
-  if (field === "pan") {
-    return `Places ${source.label} in the stereo field while leaving the other sources unchanged.`;
-  }
-  if (field === "tone") {
-    return `Chooses the tone or model feeding the ${source.block} source slot.`;
-  }
-  return `Controls whether ${source.label} participates in the temporary patch blend.`;
+function sourceFields(source: SourceDefinition) {
+  return Object.entries(source.fields)
+    .map(([field, parameterId]) => {
+      const param = parameterId ? PARAMETERS_BY_ID.get(parameterId) ?? null : null;
+      return param ? { field: field as SourceField, param } : null;
+    })
+    .filter((item): item is { field: SourceField; param: ParameterDefinition } => Boolean(item));
 }
 
-function sourceFieldRange(field: SourceField) {
-  if (field === "level" || field === "attack" || field === "brightness" || field === "fxSend") {
-    return "0% to 100%";
-  }
-  if (field === "pan") {
-    return "-50 to +50";
-  }
-  if (field === "octave") {
-    return "-2 to +2 oct";
-  }
-  if (field === "tone") {
-    return "tone option";
-  }
-  return "off to on";
+function sourceFieldParam(source: SourceDefinition, field: SourceField) {
+  const parameterId = source.fields[field];
+  return parameterId ? PARAMETERS_BY_ID.get(parameterId) ?? null : null;
 }
 
-function sourceRoleLabel(source: SourceDefinition) {
-  if (!source.enabled) {
-    return "hidden";
-  }
-  return source.role;
+function sourceIsOn(source: SourceDefinition, values: ParameterValues) {
+  const param = sourceFieldParam(source, "enabled");
+  return param ? (values[param.id] ?? param.defaultValue) > 0 : false;
+}
+
+function sourceSummary(source: SourceDefinition, values: ParameterValues) {
+  const toneParam = sourceFieldParam(source, "tone");
+  const routingParam = sourceFieldParam(source, "routing");
+  const primaryParam = toneParam ?? routingParam ?? sourceFieldParam(source, source.primaryField);
+  return primaryParam ? formatParameterValue(primaryParam, values[primaryParam.id] ?? primaryParam.defaultValue) : "unmapped";
+}
+
+function formatPcmToneNumber(value: number) {
+  const toneNumber = clamp(Math.round(value), 1, 910);
+  const category = PCM_TONE_CATEGORIES.find((item) => toneNumber >= item.first && toneNumber <= item.last);
+  return category ? `Tone ${toneNumber} (${category.name})` : `Tone ${toneNumber}`;
 }
 
 function moduleIsOn(moduleId: ParameterModuleId, values: ParameterValues) {
@@ -3575,7 +4473,7 @@ function moduleIntentControls(module: ModuleDefinition) {
               pick("reverbLevel", "Reverb level", "How much room is mixed in."),
               pick("reverbTime", "Room size", "Longer time makes the space bigger."),
               pick("reverbType", "Room character", "Ambience, room, hall or plate."),
-              pick("reverbHighCut", "Reverb brightness", "Darker or brighter reverb tail."),
+              pick("reverbHighCut", "High-cut frequency", "Selects the reverb tail low-pass cutoff."),
             ]
           : module.id === "mfx"
             ? [
@@ -3610,112 +4508,6 @@ function moduleIntentControls(module: ModuleDefinition) {
   return controls.filter((item): item is { param: ParameterDefinition; label: string; hint: string } => Boolean(item));
 }
 
-function moduleIntentButtons(module: ModuleDefinition): Array<{ intent: ModuleIntent; label: string; detail: string }> {
-  if (module.id === "delay") {
-    return [
-      { intent: "more", label: "More delay", detail: "Raise the wet/dry amount." },
-      { intent: "less", label: "Less delay", detail: "Lower the wet/dry amount." },
-      { intent: "longer", label: "Longer repeats", detail: "Increase repeat spacing." },
-      { intent: "shorter", label: "Shorter repeats", detail: "Tighten the repeat spacing." },
-      { intent: "darker", label: "Darker repeats", detail: "Use a darker delay feel where available." },
-    ];
-  }
-
-  if (module.id === "reverb") {
-    return [
-      { intent: "more", label: "More reverb", detail: "Raise the reverb level." },
-      { intent: "less", label: "Less wash", detail: "Lower the reverb level." },
-      { intent: "longer", label: "Bigger room", detail: "Increase reverb time." },
-      { intent: "shorter", label: "Smaller room", detail: "Shorten reverb time." },
-      { intent: "brighter", label: "More shimmer", detail: "Open the reverb high cut." },
-    ];
-  }
-
-  if (module.id === "amp") {
-    return [
-      { intent: "more", label: "More drive", detail: "Increase amp gain." },
-      { intent: "less", label: "Cleaner", detail: "Reduce amp gain." },
-      { intent: "brighter", label: "Brighter amp", detail: "Raise treble or presence." },
-      { intent: "darker", label: "Darker amp", detail: "Lower treble or presence." },
-    ];
-  }
-
-  if (module.id === "chorus" || module.id === "mod" || module.id === "mfx") {
-    return [
-      { intent: "more", label: "More effect", detail: "Raise the main effect amount." },
-      { intent: "less", label: "Less effect", detail: "Lower the main effect amount." },
-      { intent: "movement", label: "More movement", detail: "Increase rate or depth where available." },
-      { intent: "darker", label: "Darker color", detail: "Reduce brightness or send where available." },
-    ];
-  }
-
-  return [
-    { intent: "more", label: "More", detail: "Increase the primary amount." },
-    { intent: "less", label: "Less", detail: "Decrease the primary amount." },
-    { intent: "brighter", label: "Brighter", detail: "Raise high-frequency controls." },
-    { intent: "darker", label: "Darker", detail: "Lower high-frequency controls." },
-  ];
-}
-
-function moduleIntentTarget(module: ModuleDefinition, intent: ModuleIntent) {
-  const byId = new Map(module.parameters.map((param) => [param.id, param]));
-  const target = (id: string, delta: number) => {
-    const param = byId.get(id);
-    return param ? { param, delta } : null;
-  };
-
-  if (module.id === "delay") {
-    if (intent === "more") return target("delayLevel", 8);
-    if (intent === "less") return target("delayLevel", -8);
-    if (intent === "longer") return target("delayTime", 80);
-    if (intent === "shorter") return target("delayTime", -80);
-    return target("delayFeedback", intent === "darker" ? -6 : 6);
-  }
-
-  if (module.id === "reverb") {
-    if (intent === "more") return target("reverbLevel", 8);
-    if (intent === "less") return target("reverbLevel", -8);
-    if (intent === "longer") return target("reverbTime", 0.4);
-    if (intent === "shorter") return target("reverbTime", -0.4);
-    return target("reverbHighCut", intent === "brighter" ? 1 : -1);
-  }
-
-  if (module.id === "amp") {
-    if (intent === "more") return target("ampGain", 8);
-    if (intent === "less") return target("ampGain", -8);
-    if (intent === "brighter") return target("ampTreble", 6);
-    return target("ampTreble", -6);
-  }
-
-  if (module.id === "chorus") {
-    if (intent === "more") return target("chorusLevel", 8);
-    if (intent === "less") return target("chorusLevel", -8);
-    return target("chorusDepth", intent === "movement" ? 8 : -6);
-  }
-
-  if (module.id === "mfx") {
-    if (intent === "more") return target("mfxReverbSend", 8);
-    if (intent === "less") return target("mfxReverbSend", -8);
-    return target("mfxChorusSend", intent === "movement" ? 8 : -6);
-  }
-
-  if (module.id === "mod") {
-    if (intent === "more") return target("odDsLevel", 8);
-    if (intent === "less") return target("odDsLevel", -8);
-    if (intent === "movement") return target("odDsDrive", 8);
-    return target("odDsTone", intent === "brighter" ? 6 : -6);
-  }
-
-  if (module.id === "eq") {
-    if (intent === "more" || intent === "brighter") return target("eqHighGain", 2);
-    if (intent === "less" || intent === "darker") return target("eqHighGain", -2);
-    return target("eqLevel", 2);
-  }
-
-  const firstSlider = module.parameters.find((param) => param.kind === "slider");
-  return firstSlider ? { param: firstSlider, delta: intent === "less" || intent === "darker" ? -5 : 5 } : null;
-}
-
 function modulePrimaryValue(module: ModuleDefinition, values: ParameterValues) {
   const controls = moduleIntentControls(module);
   const param = controls.find((item) => item.param.kind === "slider")?.param ?? controls[0]?.param;
@@ -3730,9 +4522,12 @@ function moduleBeforeAfter(module: ModuleDefinition, values: ParameterValues, or
   return `${readableParameterName(changed)}: ${formatParameterValue(changed, originalValues[changed.id])} to ${formatParameterValue(changed, values[changed.id])}`;
 }
 
-function getWorkflowState(isConnected: boolean, patchLoaded: boolean, dirtyCount: number): WorkflowState {
+function getWorkflowState(isConnected: boolean, slotSelectionConfirmed: boolean, patchLoaded: boolean, dirtyCount: number): WorkflowState {
   if (!isConnected) {
     return "disconnected";
+  }
+  if (!slotSelectionConfirmed) {
+    return "select-slot";
   }
   if (!patchLoaded) {
     return "ready-to-read";
@@ -3744,6 +4539,9 @@ function nextStepTitle(workflowState: WorkflowState, operationState: OperationSt
   if (workflowState === "disconnected") {
     return "Connect first";
   }
+  if (workflowState === "select-slot") {
+    return "Select a USER slot";
+  }
   if (workflowState === "ready-to-read") {
     return "Read the current GR-55 patch";
   }
@@ -3751,7 +4549,7 @@ function nextStepTitle(workflowState: WorkflowState, operationState: OperationSt
     return "Save when ready";
   }
   if (operationState === "saved") {
-    return "Saved. Keep editing or choose another patch";
+    return "Save verified. Keep editing or choose another patch";
   }
   return "Choose what to edit";
 }
@@ -3760,15 +4558,21 @@ function nextActionKicker(workflowState: WorkflowState, selectedPatch: UserPatch
   if (workflowState === "disconnected") {
     return "GR-55 is not connected";
   }
+  if (workflowState === "select-slot") {
+    return "No USER slot selected";
+  }
   if (!patchLoaded) {
     return "No temporary patch has been read";
   }
-  return `Patch USER ${selectedPatch.label} loaded`;
+  return `Mapped values received for USER ${selectedPatch.label}`;
 }
 
 function nextActionBody(workflowState: WorkflowState, liveWrite: boolean, dirtyCount: number) {
   if (workflowState === "disconnected") {
     return "Connect the hardware from the toolbar. The editor will keep the patch view quiet until a route is ready.";
+  }
+  if (workflowState === "select-slot") {
+    return "Choose a USER slot first. The app will send Bank Select and Program Change before any mapped read/export/save workflow.";
   }
   if (workflowState === "ready-to-read") {
     return "Read Patch pulls the current temporary patch into the editor before you make changes.";
@@ -3778,7 +4582,7 @@ function nextActionBody(workflowState: WorkflowState, liveWrite: boolean, dirtyC
   }
   return liveWrite
     ? "Click a source or effect block. Live Preview is on, so mapped changes are heard as you move them."
-    : "Click a source or effect block. Changes are staged until you use Send Preview.";
+    : "Click a source or effect block. Changes are staged until you use Send Staged.";
 }
 
 function moduleEditorHint(module: ModuleDefinition) {
@@ -3815,26 +4619,30 @@ function sourceFieldLabel(field: SourceField) {
       return "Pan";
     case "tone":
       return "Tone";
-    case "attack":
-      return "Attack";
-    case "brightness":
-      return "Brightness";
     case "octave":
       return "Octave";
-    case "fxSend":
-      return "Effects send";
-    case "muted":
-      return "Mute";
-    case "solo":
-      return "Solo";
+    case "routing":
+      return "Routing";
+    case "coarseTune":
+      return "Coarse tune";
+    case "fineTune":
+      return "Fine tune";
+    case "cutoff":
+      return "Cutoff";
+    case "resonance":
+      return "Resonance";
+    case "attack":
+      return "Attack";
+    case "release":
+      return "Release";
   }
 }
 
 function formatSourceValue(field: SourceField, value: unknown) {
-  if (field === "enabled" || field === "muted" || field === "solo") {
+  if (field === "enabled") {
     return value ? "ON" : "OFF";
   }
-  if (field === "level" || field === "attack" || field === "brightness" || field === "fxSend") {
+  if (field === "level") {
     return `${value}%`;
   }
   if (field === "octave") {
@@ -3878,6 +4686,11 @@ function downloadUrl(url: string, filename: string) {
   document.body.append(link);
   link.click();
   link.remove();
+}
+
+function makeJsonDownloadUrl(data: unknown) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json;charset=utf-8" });
+  return URL.createObjectURL(blob);
 }
 
 function isTextImport(name: string) {

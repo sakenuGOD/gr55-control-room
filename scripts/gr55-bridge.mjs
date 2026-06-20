@@ -12,6 +12,8 @@ const GR55_PRODUCT_ID = 0x0127;
 const CONFIGURATION_VALUE = 1;
 const MIDI_INTERFACE = 2;
 const TRANSFER_TIMEOUT_MS = 250;
+const POST_SEND_DRAIN_MS = 120;
+const POST_SEND_DRAIN_TIMEOUT_MS = 80;
 
 const ENDPOINT_CANDIDATES = [
   { alternateSetting: 0, outEndpointNumber: 3, inEndpointNumber: 2 },
@@ -40,6 +42,7 @@ let currentEndpointSet = null;
 let pollGeneration = 0;
 let pollInFlight = null;
 let sending = false;
+let sendQueue = Promise.resolve();
 let statusState = "idle";
 let lastError = "";
 const decoder = createUsbMidiDecoder();
@@ -111,7 +114,7 @@ async function handleClientMessage(socket, data) {
     }
 
     if (message.type === "send") {
-      await sendMidiBytes(message.bytes, message.label);
+      await enqueueMidiSend(message.bytes, message.label);
       return;
     }
 
@@ -121,6 +124,10 @@ async function handleClientMessage(socket, data) {
     lastError = text;
     console.error(`[gr55-bridge] ${text}`);
     sendJson(socket, { type: "error", message: text });
+    if (currentDevice?.opened && currentEndpointSet && isTransientUsbEndpointError(error)) {
+      await broadcastStatus("transient-usb-error");
+      return;
+    }
     await broadcastStatus("error");
   }
 }
@@ -161,7 +168,8 @@ async function connectUsb() {
 
     console.log(`[gr55-bridge] connected ${endpointSet.label}`);
     broadcastLog({ direction: "system", label: `USB connected: ${endpointSet.label}` });
-    broadcastLog({ direction: "system", label: "USB input is read after each command to avoid empty-read cancellation." });
+    startPolling(device, endpointSet);
+    broadcastLog({ direction: "system", label: "Continuous USB MIDI input polling active." });
   } catch (error) {
     statusState = "error";
     lastError = formatError(error);
@@ -221,6 +229,7 @@ function startPolling(device, endpointSet) {
         }
 
         if (isTransientPollError(error)) {
+          await sleep(80);
           continue;
         }
 
@@ -316,17 +325,28 @@ async function sendMidiBytes(rawBytes, rawLabel) {
   sending = true;
   try {
     if (pollInFlight) {
-      await pollInFlight.catch(() => null);
+      const inFlightResult = await pollInFlight.catch(() => null);
+      pollInFlight = null;
+      const inFlightBytes = bytesFromUsbData(inFlightResult?.data);
+      if (inFlightBytes.length) {
+        handleIncomingUsbBytes(inFlightBytes);
+      }
     }
 
     const result = await currentDevice.transferOut(currentEndpointSet.outEndpoint.endpointNumber, packets);
     const bytesWritten = result?.bytesWritten ?? packets.length;
     console.log(`[gr55-bridge] out ${label}: ${formatHex(bytes)} (${bytesWritten} USB bytes)`);
     broadcastLog({ direction: "out", label, bytes });
-    await drainUsbInput(currentDevice, currentEndpointSet, 700);
+    await drainUsbInput(currentDevice, currentEndpointSet, POST_SEND_DRAIN_MS);
   } finally {
     sending = false;
   }
+}
+
+function enqueueMidiSend(bytes, label) {
+  const pending = sendQueue.then(() => sendMidiBytes(bytes, label));
+  sendQueue = pending.catch(() => {});
+  return pending;
 }
 
 async function drainUsbInput(device, endpointSet, durationMs) {
@@ -338,7 +358,7 @@ async function drainUsbInput(device, endpointSet, durationMs) {
       const result = await device.transferIn(
         endpointSet.inEndpoint.endpointNumber,
         endpointSet.inEndpoint.packetSize || 64,
-        180,
+        POST_SEND_DRAIN_TIMEOUT_MS,
       );
       const bytes = bytesFromUsbData(result?.data);
 
@@ -347,7 +367,7 @@ async function drainUsbInput(device, endpointSet, durationMs) {
         handleIncomingUsbBytes(bytes);
       }
     } catch (error) {
-      if (isTransferTimeout(error)) {
+      if (isTransferTimeout(error) || isTransientUsbEndpointError(error)) {
         break;
       }
 
@@ -683,7 +703,11 @@ function sleep(ms) {
 }
 
 function isTransientPollError(error) {
-  return isTransferTimeout(error) || /cancelled/i.test(formatError(error));
+  return isTransferTimeout(error) || /cancelled/i.test(formatError(error)) || isTransientUsbEndpointError(error);
+}
+
+function isTransientUsbEndpointError(error) {
+  return /endpoint not found/i.test(formatError(error));
 }
 
 function isTransferTimeout(error) {

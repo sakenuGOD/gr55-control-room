@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   MAX_IMPORT_BYTES,
+  classifyImportedSysExMessages,
   parseImportedSysEx,
   serializeMessagesAsHex,
   splitSysExMessages,
   validateImportFileMeta,
 } from "../src/lib/sysexLibrary";
+import { makeDataSetMessage } from "../src/lib/roland";
+import { makePatchNameWriteMessage } from "../src/lib/patchName";
+import { parseMappedPatchMessages } from "../src/lib/patchImport";
 
 describe("SysEx import library", () => {
   it("splits binary SysEx dumps into individual messages", () => {
@@ -54,5 +58,48 @@ describe("SysEx import library", () => {
         { label: "B", bytes: [0xf0, 0x7e, 0xf7] },
       ]),
     ).toBe("F0 41 F7\n\nF0 7E F7");
+  });
+
+  it("classifies imported GR-55 mapped parameter queues", () => {
+    const messages = [
+      { label: "Patch level", bytes: makeDataSetMessage([0x18, 0x00, 0x02, 0x30], [0x06, 0x04]) },
+      { label: "Delay switch", bytes: makeDataSetMessage([0x18, 0x00, 0x06, 0x05], [0x01]) },
+    ];
+
+    expect(
+      classifyImportedSysExMessages(messages, {
+        knownAddressKeys: new Set(["18:00:02:30", "18:00:06:05"]),
+        mappedParameterCount: 2,
+      }),
+    ).toMatchObject({
+      kind: "mapped-patch",
+      label: "Mapped patch parameter set",
+    });
+  });
+
+  it("classifies unknown SysEx queues without claiming restore support", () => {
+    expect(classifyImportedSysExMessages([{ label: "Unknown", bytes: [0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7] }])).toMatchObject({
+      kind: "unknown",
+      label: "Unknown SysEx queue",
+    });
+  });
+
+  it("parses imported patch name and mapped values from DT1 messages", () => {
+    const parsed = parseMappedPatchMessages([
+      { label: "Patch name", bytes: makePatchNameWriteMessage("USER 73-3", 0x10) },
+      { label: "Patch level", bytes: makeDataSetMessage([0x18, 0x00, 0x02, 0x30], [0x06, 0x04]) },
+      { label: "PCM1 off", bytes: makeDataSetMessage([0x18, 0x00, 0x20, 0x03], [0x01]) },
+    ]);
+
+    expect(parsed).toMatchObject({
+      patchName: "USER 73-3",
+      patchNameMessages: 1,
+      mappedMessages: 2,
+      checksumErrors: 0,
+      values: {
+        patchLevel: 100,
+        pcm1Switch: 0,
+      },
+    });
   });
 });

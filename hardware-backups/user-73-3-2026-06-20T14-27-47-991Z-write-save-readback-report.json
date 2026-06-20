@@ -1,0 +1,261 @@
+{
+  "createdAt": "2026-06-20T14:27:47.992Z",
+  "slot": "USER 73-3",
+  "parameter": "pcm1Level",
+  "parameterAddress": [
+    24,
+    0,
+    32,
+    4
+  ],
+  "result": {
+    "before": {
+      "patchName": "GHOSTLY",
+      "pcm1Level": 65
+    },
+    "writeTest": {
+      "target": {
+        "patchName": "GHOSTLY TMP",
+        "pcm1Level": 66
+      },
+      "readBack": {
+        "patchName": "GHOSTLY TMP",
+        "pcm1Level": 66
+      },
+      "ok": true
+    },
+    "restore": {
+      "target": {
+        "patchName": "GHOSTLY",
+        "pcm1Level": 65
+      },
+      "readBack": {
+        "patchName": "GHOSTLY",
+        "pcm1Level": 65
+      },
+      "ok": true
+    },
+    "after": {
+      "patchName": "GHOSTLY",
+      "pcm1Level": 65
+    },
+    "success": true
+  },
+  "events": [
+    {
+      "direction": "out",
+      "label": "HW VERIFY select USER 73-3 Bank MSB",
+      "hex": "B0 00 01",
+      "at": "2026-06-20T14:27:41.578Z"
+    },
+    {
+      "direction": "out",
+      "label": "HW VERIFY select USER 73-3 Program 90",
+      "hex": "C0 5A",
+      "at": "2026-06-20T14:27:41.760Z"
+    },
+    {
+      "direction": "out",
+      "label": "before read patch name",
+      "hex": "F0 41 10 00 00 53 11 18 00 00 01 00 00 00 10 57 F7",
+      "at": "2026-06-20T14:27:42.662Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:00:01",
+      "hex": "F0 41 10 00 00 53 12 18 00 00 01 47 48 4F 53 54 4C 59 20 20 20 20 20 20 20 20 20 1D F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:42.666Z"
+    },
+    {
+      "direction": "out",
+      "label": "before read pcm1Level",
+      "hex": "F0 41 10 00 00 53 11 18 00 20 04 00 00 00 01 43 F7",
+      "at": "2026-06-20T14:27:42.823Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:04",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 04 53 71 F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:42.836Z"
+    },
+    {
+      "direction": "out",
+      "label": "write-test write patch name GHOSTLY TMP",
+      "hex": "F0 41 10 00 00 53 12 18 00 00 01 47 48 4F 53 54 4C 59 20 54 4D 50 20 20 20 20 20 0C F7",
+      "at": "2026-06-20T14:27:42.924Z"
+    },
+    {
+      "direction": "out",
+      "label": "write-test write pcm1Level 66",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 04 54 70 F7",
+      "at": "2026-06-20T14:27:43.105Z"
+    },
+    {
+      "direction": "out",
+      "label": "write-test save temp to USER 73-3",
+      "hex": "F0 41 10 00 00 53 11 0F 00 00 00 01 00 5A 7F 17 F7",
+      "at": "2026-06-20T14:27:43.457Z"
+    },
+    {
+      "direction": "out",
+      "label": "write-test verify read patch name",
+      "hex": "F0 41 10 00 00 53 11 18 00 00 01 00 00 00 10 57 F7",
+      "at": "2026-06-20T14:27:44.659Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:00:01",
+      "hex": "F0 41 10 00 00 53 12 18 00 00 01 47 48 4F 53 54 4C 59 20 54 4D 50 20 20 20 20 20 0C F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:44.688Z"
+    },
+    {
+      "direction": "out",
+      "label": "write-test verify read pcm1Level",
+      "hex": "F0 41 10 00 00 53 11 18 00 20 04 00 00 00 01 43 F7",
+      "at": "2026-06-20T14:27:44.821Z"
+    },
+    {
+      "direction": "in",
+      "key": "0f:00:00:02",
+      "hex": "F0 41 10 00 00 53 12 0F 00 00 02 00 00 00 01 00 5A 7F 15 F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:44.901Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:04",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 04 54 70 F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:44.902Z"
+    },
+    {
+      "direction": "out",
+      "label": "restore write patch name GHOSTLY",
+      "hex": "F0 41 10 00 00 53 12 18 00 00 01 47 48 4F 53 54 4C 59 20 20 20 20 20 20 20 20 20 1D F7",
+      "at": "2026-06-20T14:27:44.923Z"
+    },
+    {
+      "direction": "out",
+      "label": "restore write pcm1Level 65",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 04 53 71 F7",
+      "at": "2026-06-20T14:27:45.105Z"
+    },
+    {
+      "direction": "out",
+      "label": "restore save temp to USER 73-3",
+      "hex": "F0 41 10 00 00 53 11 0F 00 00 00 01 00 5A 7F 17 F7",
+      "at": "2026-06-20T14:27:45.456Z"
+    },
+    {
+      "direction": "out",
+      "label": "restore verify read patch name",
+      "hex": "F0 41 10 00 00 53 11 18 00 00 01 00 00 00 10 57 F7",
+      "at": "2026-06-20T14:27:46.657Z"
+    },
+    {
+      "direction": "out",
+      "label": "restore verify read pcm1Level",
+      "hex": "F0 41 10 00 00 53 11 18 00 20 04 00 00 00 01 43 F7",
+      "at": "2026-06-20T14:27:46.819Z"
+    },
+    {
+      "direction": "in",
+      "key": "0f:00:00:02",
+      "hex": "F0 41 10 00 00 53 12 0F 00 00 02 00 00 00 01 00 5A 7F 15 F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:46.888Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:03",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 03 00 45 F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:46.889Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:00",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 00 58 06 0E 5C F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:46.942Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:04",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 04 53 71 F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:46.944Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:05",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 05 40 03 F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:46.964Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:06",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 06 00 42 F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:46.984Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:00:01",
+      "hex": "F0 41 10 00 00 53 12 18 00 00 01 47 48 4F 53 54 4C 59 20 20 20 20 20 20 20 20 20 1D F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:47.070Z"
+    },
+    {
+      "direction": "out",
+      "label": "final read patch name",
+      "hex": "F0 41 10 00 00 53 11 18 00 00 01 00 00 00 10 57 F7",
+      "at": "2026-06-20T14:27:47.124Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:08",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 08 01 3F F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:47.237Z"
+    },
+    {
+      "direction": "out",
+      "label": "final read pcm1Level",
+      "hex": "F0 41 10 00 00 53 11 18 00 20 04 00 00 00 01 43 F7",
+      "at": "2026-06-20T14:27:47.286Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:04",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 04 53 71 F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:47.406Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:09",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 09 68 57 F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:47.574Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:20:0a",
+      "hex": "F0 41 10 00 00 53 12 18 00 20 0A 40 7E F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:47.744Z"
+    },
+    {
+      "direction": "in",
+      "key": "18:00:00:01",
+      "hex": "F0 41 10 00 00 53 12 18 00 00 01 47 48 4F 53 54 4C 59 20 20 20 20 20 20 20 20 20 1D F7",
+      "checksumValid": true,
+      "at": "2026-06-20T14:27:47.915Z"
+    }
+  ]
+}

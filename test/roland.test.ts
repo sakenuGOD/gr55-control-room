@@ -1,8 +1,26 @@
 import { describe, expect, it } from "vitest";
 import { USER_PATCHES, getUserPatchMidiRange } from "../src/data/gr55PatchMap";
-import { PARAMETERS, encodeParameterValue, makeParameterMessage } from "../src/data/gr55Parameters";
+import {
+  PARAMETERS,
+  PARAMETERS_BY_ID,
+  UNMAPPED_PARAMETER_TODOS,
+  decodeParameterValue,
+  encodeParameterValue,
+  makeMappedPatchReadMessages,
+  makeParameterMessage,
+  makeParameterReadMessage,
+} from "../src/data/gr55Parameters";
+import {
+  PATCH_NAME_ADDRESS,
+  PATCH_NAME_LENGTH,
+  decodePatchName,
+  encodePatchName,
+  makePatchNameReadMessage,
+  makePatchNameWriteMessage,
+  validatePatchName,
+} from "../src/lib/patchName";
 import { parseIncomingMidiMessage } from "../src/lib/midiMessages";
-import { makeDataSetMessage, makeSaveUserPatchMessage, rolandChecksum, toHex } from "../src/lib/roland";
+import { makeDataRequestMessage, makeDataSetMessage, makeSaveUserPatchMessage, rolandChecksum, toHex } from "../src/lib/roland";
 
 describe("Roland GR-55 SysEx helpers", () => {
   it("calculates the Roland checksum", () => {
@@ -124,6 +142,111 @@ describe("GR-55 parameter encoding", () => {
     expect(delaySwitch).toBeDefined();
     expect(makeParameterMessage(delaySwitch!, 1, 0x10)).toEqual(
       makeDataSetMessage([0x18, 0x00, 0x06, 0x05], [0x01], 0x10),
+    );
+  });
+
+  it("builds RQ1 read messages for individual mapped parameters", () => {
+    const delayTime = PARAMETERS.find((param) => param.id === "delayTime");
+    expect(delayTime).toBeDefined();
+    expect(makeParameterReadMessage(delayTime!, 0x10)).toEqual(
+      makeDataRequestMessage([0x18, 0x00, 0x06, 0x07], [0x00, 0x00, 0x00, 0x03], 0x10),
+    );
+  });
+
+  it("builds a full mapped patch read request set", () => {
+    const messages = makeMappedPatchReadMessages(0x10);
+
+    expect(messages).toHaveLength(PARAMETERS.length);
+    expect(messages[0].label).toContain(PARAMETERS[0].label);
+    expect(messages[0].bytes).toEqual(makeParameterReadMessage(PARAMETERS[0], 0x10));
+    expect(new Set(messages.map((message) => toHex(message.bytes)))).toHaveLength(PARAMETERS.length);
+  });
+
+  it("round-trips every mapped parameter default through its SysEx value bytes", () => {
+    for (const param of PARAMETERS) {
+      const encoded = encodeParameterValue(param, param.defaultValue);
+      expect(decodeParameterValue(param, encoded), param.id).toBe(param.defaultValue);
+    }
+  });
+
+  it("maps the core GR-55 sound source controls to real temporary-patch addresses", () => {
+    expect(PARAMETERS_BY_ID.get("pcm1Switch")).toMatchObject({
+      moduleId: "pcm1",
+      address: [0x18, 0x00, 0x20, 0x03],
+      hardwareVerificationStatus: "fixture-only",
+    });
+    expect(PARAMETERS_BY_ID.get("pcm2Switch")).toMatchObject({
+      moduleId: "pcm2",
+      address: [0x18, 0x00, 0x21, 0x03],
+      hardwareVerificationStatus: "fixture-only",
+    });
+    expect(PARAMETERS_BY_ID.get("modelingSwitch")).toMatchObject({
+      moduleId: "modeling",
+      address: [0x18, 0x00, 0x10, 0x0a],
+      hardwareVerificationStatus: "fixture-only",
+    });
+    expect(PARAMETERS_BY_ID.get("normalPuSwitch")).toMatchObject({
+      moduleId: "normal-pu",
+      address: [0x18, 0x00, 0x02, 0x32],
+      hardwareVerificationStatus: "fixture-only",
+    });
+  });
+
+  it("keeps nonresponding USER 73-3 hardware addresses out of the working mapped set", () => {
+    expect(PARAMETERS_BY_ID.has("pcm1PortamentoTime")).toBe(false);
+    expect(PARAMETERS_BY_ID.has("pcm2PortamentoTime")).toBe(false);
+    expect(UNMAPPED_PARAMETER_TODOS).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "pcm1PortamentoTime" }),
+        expect.objectContaining({ id: "pcm2PortamentoTime" }),
+      ]),
+    );
+  });
+
+  it("encodes GR-55 inverted source mute switches as source on/off controls", () => {
+    const pcm1Switch = PARAMETERS_BY_ID.get("pcm1Switch");
+    expect(pcm1Switch).toBeDefined();
+    expect(encodeParameterValue(pcm1Switch!, 1)).toEqual([0x00]);
+    expect(encodeParameterValue(pcm1Switch!, 0)).toEqual([0x01]);
+    expect(decodeParameterValue(pcm1Switch!, [0x00])).toBe(1);
+    expect(decodeParameterValue(pcm1Switch!, [0x01])).toBe(0);
+  });
+
+  it("encodes PCM tone numbers using the Roland three-byte tone select field", () => {
+    const pcm1Tone = PARAMETERS_BY_ID.get("pcm1ToneNumber");
+    expect(pcm1Tone).toBeDefined();
+    expect(encodeParameterValue(pcm1Tone!, 1)).toEqual([0x58, 0x00, 0x00]);
+    expect(encodeParameterValue(pcm1Tone!, 2)).toEqual([0x58, 0x00, 0x01]);
+    expect(encodeParameterValue(pcm1Tone!, 897)).toEqual([0x56, 0x00, 0x00]);
+    expect(decodeParameterValue(pcm1Tone!, [0x58, 0x00, 0x04])).toBe(5);
+    expect(decodeParameterValue(pcm1Tone!, [0x56, 0x00, 0x0d])).toBe(910);
+  });
+});
+
+describe("GR-55 patch name mapping", () => {
+  it("validates printable temporary patch names with the GR-55 fixed length", () => {
+    expect(PATCH_NAME_LENGTH).toBe(16);
+    expect(validatePatchName("USER 73-3")).toEqual({ valid: true });
+    expect(validatePatchName("12345678901234567")).toMatchObject({ valid: false });
+    expect(validatePatchName("Bad\nName")).toMatchObject({ valid: false });
+  });
+
+  it("encodes and decodes padded ASCII patch name bytes", () => {
+    const encoded = encodePatchName("USER 73-3");
+
+    expect(encoded).toHaveLength(PATCH_NAME_LENGTH);
+    expect(encoded.slice(0, 9)).toEqual([0x55, 0x53, 0x45, 0x52, 0x20, 0x37, 0x33, 0x2d, 0x33]);
+    expect(encoded.slice(9)).toEqual(Array(PATCH_NAME_LENGTH - 9).fill(0x20));
+    expect(decodePatchName(encoded)).toBe("USER 73-3");
+  });
+
+  it("builds patch name RQ1 and DT1 messages at the mapped common address", () => {
+    expect(PATCH_NAME_ADDRESS).toEqual([0x18, 0x00, 0x00, 0x01]);
+    expect(makePatchNameReadMessage(0x10)).toEqual(
+      makeDataRequestMessage(PATCH_NAME_ADDRESS, [0x00, 0x00, 0x00, PATCH_NAME_LENGTH], 0x10),
+    );
+    expect(makePatchNameWriteMessage("HELLO", 0x10)).toEqual(
+      makeDataSetMessage(PATCH_NAME_ADDRESS, encodePatchName("HELLO"), 0x10),
     );
   });
 });
